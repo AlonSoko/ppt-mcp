@@ -34,6 +34,7 @@ from ppt_com.constants import (
 )
 from ppt_com.shapes import SHAPE_NAME_MAP
 from ppt_com.shape_lookup import resolve_shape as _get_shape
+from ppt_com.layout_check import report_layout, touched_names
 
 from ppt_com.shapes import ZORDER_FIELD_DESCRIPTION, place_in_zorder
 
@@ -1786,6 +1787,7 @@ def add_svg_icon(params: AddSvgIconInput) -> str:
             params.left, params.top, params.width, params.height,
             params.color, params.style, params.filled, params.zorder,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add SVG icon: {str(e)}"})

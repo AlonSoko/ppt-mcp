@@ -19,6 +19,7 @@ from utils.navigation import goto_slide
 from utils.redraw import FrozenRedraw
 from utils.color import hex_to_int, int_to_hex, int_to_rgb, get_theme_color_index
 from utils.validation import font_size_warning
+from ppt_com.layout_check import report_layout, touched_names
 from ppt_com.constants import (
     msoTrue, msoFalse, msoTriStateMixed,
     msoPlaceholder, msoGroup,
@@ -2228,6 +2229,7 @@ def set_text(params: SetTextInput) -> str:
         if warnings:
             result["warnings"] = sorted(
                 set(result.get("warnings", [])) | set(warnings))
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -2268,6 +2270,7 @@ def format_text(params: FormatTextInput) -> str:
         warn = font_size_warning(params.font_size)
         if warn:
             result["warning"] = warn
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -2299,6 +2302,7 @@ def format_text_range(params: FormatTextRangeInput) -> str:
                 # would hide that part of the call did nothing.
                 result["warnings"] = sorted(
                     set(result.get("warnings", [])) | set(warnings))
+            report_layout(result, params.slide_index, touched_names(result))
             return json.dumps(result)
 
         result = ppt.execute(
@@ -2314,6 +2318,7 @@ def format_text_range(params: FormatTextRangeInput) -> str:
         warn = font_size_warning(params.font_size)
         if warn:
             result["warning"] = warn
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -2389,6 +2394,7 @@ def set_textframe(params: SetTextframeInput) -> str:
             params.margin_left, params.margin_right, params.margin_top, params.margin_bottom,
             params.orientation, params.vertical_anchor,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})

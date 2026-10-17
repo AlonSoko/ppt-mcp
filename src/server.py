@@ -581,6 +581,13 @@ try:
 except ImportError:
     logger.debug("layout module not yet available")
 
+# Layout check (measured problems on a slide or across the deck)
+try:
+    from ppt_com.layout_check import register_tools as register_layout_check_tools
+    register_layout_check_tools(mcp)
+except ImportError:
+    logger.debug("layout_check module not yet available")
+
 # Visual effects tools (glow, reflection, soft edge)
 try:
     from ppt_com.effects import register_tools as register_effects_tools

@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>Real-time PowerPoint control on Windows and macOS —<br>an MCP server with 156 tools for AI agents and developers.</strong>
+  <strong>Real-time PowerPoint control on Windows and macOS —<br>an MCP server with 157 tools for AI agents and developers.</strong>
 </p>
 
 ---
@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/178b9b5b-624d-4de0-a1dd-619dc13d4bd7
 ## ✨ Key Features
 
 - **Real-time control** — Directly manipulates a running PowerPoint instance; changes appear instantly on screen
-- **156 tools across 26 categories** — Slides, shapes, text, tables, charts, animations, SmartArt, media, freeform paths, and more
+- **157 tools across 26 categories** — Slides, shapes, text, tables, charts, animations, SmartArt, media, freeform paths, and more
 - **Safe for AI agents** — `ppt_activate_presentation` locks all tools to a specific file, preventing accidental edits to the wrong presentation
 - **[Google Material Symbols](https://fonts.google.com/icons) icons** — Search 2,500+ icons by keyword and insert as SVG with theme colors
 - **Theme color awareness** — Use `accent1`, `accent2`, etc. instead of hardcoded RGB values
@@ -152,12 +152,12 @@ uv sync
 | **Media** | 3 | Video, audio, media settings |
 | **SmartArt** | 3 | Add, modify, list layouts |
 | **Edit Operations** | 6 | Undo and redo (on the target presentation), copy shapes/formatting between slides |
-| **Layout** | 7 | Align, distribute, slide size, background, flip, merge shapes |
+| **Layout** | 8 | Align, distribute, slide size, background, flip, merge shapes, layout check |
 | **Effects** | 3 | Glow and reflection (on the shape or on its text), soft edge |
 | **Comments** | 3 | Add, list, delete |
 | **Advanced** | 19 | Tags, fonts (set defaults + bulk replace), crop, picture format, shape export, visibility, selection, view, animation copy, picture from URL, SVG icons, icon search, aspect ratio lock, batch apply, default shape style |
 | **Freeform** | 7 | Build freeform paths, get/set node positions, insert/delete nodes, node editing type, segment type |
-| | **156** | |
+| | **157** | |
 
 ## 💡 Example Prompts
 
@@ -285,6 +285,19 @@ Modes can be combined: use a preset as a base and override specific slots. All a
 - **Auto-shrunk text** — text silently compressed by PowerPoint's shrink-to-fit feature
 
 Auto-fix strategies include widening text boxes and inserting soft returns.
+
+### 📐 Layout Check
+
+`ppt_check_layout` measures a slide, or the whole deck, and reports what is wrong as numbers rather than as a picture, so it works whether or not the model can read images:
+- **Off the slide** — a shape, or its text, reaching past a slide edge
+- **Overflow** — text that needs more room than its box gives it
+- **Overlap** — text running into another shape or into other text
+- **Low contrast** — text against what is behind it, below the WCAG minimum for its size
+- **Misaligned** — edges a few points apart that were meant to line up
+- **Uneven spacing** — a row or column of like shapes with unequal gaps
+- **Empty placeholders**, and, for the whole deck, **titles** that change size or position between slides with the same layout
+
+Each issue names the shapes and says how to fix it. The tools that add, move, resize or retext a shape also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it.
 
 ## ⚙️ Advanced Configuration
 

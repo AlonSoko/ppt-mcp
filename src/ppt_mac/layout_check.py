@@ -1,0 +1,332 @@
+"""Reading a slide for the layout checks, on Apple Events.
+
+Mirrors the reading half of ``ppt_com/layout_check.py``: the same function
+names and signatures, and the same plain dicts coming back, so every check
+after the reading is shared.
+
+The write tools run this after every write, so it is built around how few
+events a slide can be read in. Asking an object for ``properties`` answers
+every property it has in one event, and that is the whole technique:
+
+- ``slide.shapes.properties`` is one event for every shape on the slide, and
+  carries geometry, type, visibility, the connector flag, ``rotation`` (under
+  the name ``rotation_``, appscript's way round the clash with AppleScript's
+  own word) and a placeholder's type.
+- A fill, a text frame and a text range are one event each the same way.
+- Reaching through every shape at once does not work. ``fill format of every
+  shape`` answers ``missing value`` for each of them, so those reads stay one
+  per shape.
+
+So a shape costs one event and a shape with text two, or about seven for
+the shape a write tool touched, which is read in full. Reading the same things
+property by property cost about twenty five a shape.
+
+Two things differ from Windows besides the spelling. ``line format`` has no
+``visible`` here, so ``line_visible`` stays None and the shared code decides
+from the shape's kind, as ``ppt_get_shape_info`` already declines to guess. And
+there is no run element, so the colour, size and weight of every character are
+read as columns and folded into the distinct styles the checks need, as
+``ppt_get_text`` rebuilds runs.
+"""
+
+import logging
+
+from appscript import k
+
+from backend.mac_ae import (
+    elements,
+    is_missing,
+    ppt,
+    shapes_of,
+    slide_at as _slide,
+    windows_constant as _windows_constant,
+)
+from backend.mac_enums import (
+    MsoTextOrientation,
+    MsoVerticalAnchor,
+    PpParagraphAlignment,
+    PpPlaceholderType,
+)
+from ppt_com.constants import msoFillSolid, msoGroup, msoPlaceholder
+from utils.color import rgb_list_to_hex
+from utils.navigation import goto_slide
+
+logger = logging.getLogger(__name__)
+
+
+def _value(value):
+    return None if is_missing(value) else value
+
+
+def _record(ref) -> dict:
+    """Every property of one object, in one event, or an empty dict."""
+    try:
+        record = ref.properties.get()
+    except Exception:
+        logger.debug("properties refused", exc_info=True)
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def _fill_facts(shape):
+    from ppt_mac.shapes import _WIN_FILL_TYPE, _win_constant
+
+    record = _record(shape.fill_format)
+    if not record:
+        return None
+    visible = _value(record.get(k.visible))
+    transparency = _value(record.get(k.transparency))
+    colour = _value(record.get(k.fore_color))
+    return {
+        "visible": None if visible is None else bool(visible),
+        "solid": _win_constant(_WIN_FILL_TYPE, record.get(k.fill_format_type)) == msoFillSolid,
+        "color_hex": rgb_list_to_hex(colour) if isinstance(colour, list) else None,
+        "transparency": None if transparency is None else round(transparency, 2),
+    }
+
+
+def _frame_state(frame: dict) -> dict:
+    """The text frame settings, in the words ppt_set_textframe takes.
+
+    The same answer as ppt_mac.shapes._text_frame_state, read out of one
+    record rather than asked for one property at a time.
+    """
+    from ppt_com.text import AUTO_SIZE_NAMES, ORIENTATION_NAMES, VERTICAL_ANCHOR_NAMES
+    from ppt_mac.text import _AUTO_SIZE
+
+    auto_size = _windows_constant(_AUTO_SIZE, frame.get(k.auto_size))
+    wrap = _value(frame.get(k.word_wrap))
+    margins = {
+        side: _value(frame.get(key))
+        for side, key in (("left", k.margin_left), ("right", k.margin_right),
+                          ("top", k.margin_top), ("bottom", k.margin_bottom))
+    }
+    return {
+        "autofit": AUTO_SIZE_NAMES.get(auto_size),
+        "word_wrap": None if wrap is None else bool(wrap),
+        "vertical_anchor": VERTICAL_ANCHOR_NAMES.get(
+            _windows_constant(MsoVerticalAnchor, frame.get(k.vertical_anchor))),
+        "orientation": ORIENTATION_NAMES.get(
+            _windows_constant(MsoTextOrientation, frame.get(k.orientation))),
+        "margins": None if any(v is None for v in margins.values()) else {
+            side: round(value, 2) for side, value in margins.items()
+        },
+    }
+
+
+def _run_styles(text_range) -> list:
+    """The distinct colour, size and weight the visible characters use.
+
+    Most text is set in one style, and the range's own font record answers
+    that in one event: a property the characters disagree on reads back as
+    ``missing value``, so a record with all three is the whole answer. Mixed
+    text is read as columns, four events however long it is, and when
+    PowerPoint will not answer per character either, nothing is guessed.
+    """
+    font = _record(text_range.font)
+    colour = _value(font.get(k.font_color))
+    size = _value(font.get(k.font_size))
+    bold = _value(font.get(k.bold))
+    if isinstance(colour, list) and isinstance(size, (int, float)) and bold is not None:
+        return [{"color_hex": rgb_list_to_hex(colour), "size": round(size, 1),
+                 "bold": bold is True}]
+
+    try:
+        chars = text_range.characters
+        texts = chars.content.get()
+        font = chars.font
+        columns = [font.font_color.get(), font.font_size.get(), font.bold.get()]
+        if not isinstance(texts, list) or any(
+            not isinstance(column, list) or len(column) != len(texts)
+            for column in columns
+        ):
+            raise ValueError("not one value per character")
+        rows = zip(texts, *columns)
+    except Exception:
+        logger.debug("Bulk character read refused", exc_info=True)
+        return []
+
+    styles = set()
+    for char, colour, size, bold in rows:
+        if not isinstance(char, str) or not char.strip():
+            continue
+        colour, size = _value(colour), _value(size)
+        styles.add((
+            rgb_list_to_hex(colour) if isinstance(colour, list) else None,
+            round(size, 1) if isinstance(size, (int, float)) else None,
+            _value(bold) is True,
+        ))
+    return [
+        {"color_hex": colour, "size": size, "bold": bold}
+        for colour, size, bold in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
+    ]
+
+
+def _text_facts(shape, full):
+    """The macOS half of ppt_com.layout_check._text_facts.
+
+    The text range's record carries the content and where it is drawn, so a
+    shape that is read only for where its text sits costs one event. In full,
+    the frame's record and the character columns are added.
+    """
+    frame = shape.text_frame
+    facts = {
+        "chars": 0,
+        "left": None, "top": None, "width": None, "height": None,
+        "alignment": None, "runs": [],
+        "margins": None, "word_wrap": None, "autofit": None,
+        "orientation": None, "vertical_anchor": None,
+    }
+    tr = frame.text_range
+    words = _record(tr)
+    content = _value(words.get(k.content)) or ""
+    facts["chars"] = len(content.strip()) if isinstance(content, str) else 0
+    if full:
+        facts.update(_frame_state(_record(frame)))
+    if not facts["chars"]:
+        return facts
+
+    for key, name in (("left", k.left_bounds), ("top", k.top_bounds),
+                      ("width", k.bounds_width), ("height", k.bounds_height)):
+        value = _value(words.get(name))
+        if isinstance(value, (int, float)):
+            facts[key] = round(value, 2)
+    # Alignment only places text that PowerPoint would not place itself.
+    if facts["left"] is None or facts["top"] is None:
+        try:
+            facts["alignment"] = _windows_constant(
+                PpParagraphAlignment, tr.paragraphs[1].paragraph_format.alignment()
+            )
+        except Exception:
+            pass
+    if full:
+        facts["runs"] = _run_styles(tr)
+    return facts
+
+
+def _geometry_facts(shape, record, z):
+    """Where a shape is and what kind it is, out of its bulk record."""
+    from ppt_mac.shapes import _WIN_SHAPE_TYPE, _from_record, _win_constant
+
+    type_int = _win_constant(
+        _WIN_SHAPE_TYPE, _from_record(record, k.shape_type, shape, "shape_type")
+    )
+    rotation = _value(record.get(k.rotation_))
+    facts = {
+        "name": _from_record(record, k.name, shape, "name"),
+        "z": z,
+        "type": type_int,
+        "left": round(_from_record(record, k.left_position, shape, "left_position") or 0.0, 2),
+        "top": round(_from_record(record, k.top, shape, "top") or 0.0, 2),
+        "width": round(_from_record(record, k.width, shape, "width") or 0.0, 2),
+        "height": round(_from_record(record, k.height, shape, "height") or 0.0, 2),
+        "rotation": round(rotation, 2) if isinstance(rotation, (int, float)) else None,
+        "visible": True,
+        "connector": bool(_value(record.get(k.is_connector))),
+        "placeholder_type": None,
+        "fill": None,
+        "line_visible": None,
+        "text": None,
+    }
+    visible = _from_record(record, k.visible, shape, "visible")
+    if visible is not None:
+        facts["visible"] = bool(visible)
+    if type_int == msoPlaceholder:
+        facts["placeholder_type"] = _windows_constant(
+            PpPlaceholderType, record.get(k.placeholder_type))
+    # Kept for _read_appearance, which has no record; dropped before return.
+    facts["_has_text_frame"] = bool(
+        _from_record(record, k.has_text_frame, shape, "has_text_frame"))
+    return facts
+
+
+def _read_appearance(facts, shape, full):
+    """Add what the shape draws: its fill, and its text."""
+    if facts["type"] != msoGroup:
+        facts["fill"] = _fill_facts(shape)
+    if facts.get("_has_text_frame"):
+        try:
+            facts["text"] = _text_facts(shape, full)
+        except Exception:
+            logger.debug("Cannot read the text of '%s'", facts["name"], exc_info=True)
+    return facts
+
+
+def _background_hex(slide, follows_master):
+    """The macOS half of ppt_com.layout_check._background_hex.
+
+    A background is a shape here, so its colour is that shape's fill.
+    """
+    from ppt_mac.shapes import _WIN_FILL_TYPE, _win_constant
+
+    try:
+        source = slide
+        if follows_master:
+            source = slide.custom_layout
+            if source.follow_master_background():
+                source = slide.slide_master
+        fill = _record(source.background.fill_format)
+        if _win_constant(_WIN_FILL_TYPE, fill.get(k.fill_format_type)) == msoFillSolid:
+            colour = _value(fill.get(k.fore_color))
+            return rgb_list_to_hex(colour) if isinstance(colour, list) else None
+    except Exception:
+        logger.debug("Cannot read the slide background", exc_info=True)
+    return None
+
+
+def _layout_name(word):
+    """The slide's layout, in the words of the dictionary.
+
+    A custom layout has no name on macOS, so this is the built-in layout the
+    slide reports, "title only" rather than "slide layout title only".
+    """
+    word = _value(word)
+    if word is None:
+        return None
+    name = str(word).replace("k.", "").replace("_", " ")
+    return name[len("slide layout "):] if name.startswith("slide layout ") else name
+
+
+def _slide_facts_impl(slide_indices, navigate, detail):
+    from ppt_com.layout_check import needs_background, read_shapes
+    from ppt_mac.layout import _slide_dimensions
+
+    app = ppt._get_app_impl()
+    pres = ppt._get_pres_impl()
+    slide_w, slide_h = _slide_dimensions(pres)
+    facts = {"slide_width": slide_w, "slide_height": slide_h, "slides": []}
+    for slide_index in slide_indices:
+        slide = _slide(pres, slide_index)
+        if navigate:
+            goto_slide(app, slide_index)
+        refs = shapes_of(slide)
+        # Every property of every shape in one event. A short answer means
+        # PowerPoint did not give one record per shape, and each shape is
+        # then asked directly instead.
+        try:
+            records = elements(slide.shapes.properties)
+        except Exception:
+            records = []
+        if len(records) != len(refs):
+            records = [{} for _ in refs]
+        own = _record(slide)
+        follows = _value(own.get(k.follow_master_background))
+        records = [r if isinstance(r, dict) else {} for r in records]
+        shapes = read_shapes(
+            refs,
+            lambda ref, z, records=records: _geometry_facts(ref, records[z - 1], z),
+            _read_appearance,
+            detail,
+        )
+        for shape in shapes:
+            shape.pop("_has_text_frame", None)
+        facts["slides"].append({
+            "slide_index": slide_index,
+            "layout": _layout_name(own.get(k.layout)),
+            "background_hex": (
+                _background_hex(slide, True if follows is None else bool(follows))
+                if needs_background(shapes, detail) else None
+            ),
+            "shapes": shapes,
+        })
+    return facts
