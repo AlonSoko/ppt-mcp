@@ -47,7 +47,7 @@ from backend.mac_enums import (
     PpParagraphAlignment,
     PpPlaceholderType,
 )
-from ppt_com.constants import msoFillSolid, msoGroup, msoPlaceholder
+from ppt_com.constants import msoFillGradient, msoFillSolid, msoGroup, msoPlaceholder
 from utils.color import rgb_list_to_hex
 from utils.navigation import goto_slide
 
@@ -77,12 +77,41 @@ def _fill_facts(shape):
     visible = _value(record.get(k.visible))
     transparency = _value(record.get(k.transparency))
     colour = _value(record.get(k.fore_color))
-    return {
+    kind = _win_constant(_WIN_FILL_TYPE, record.get(k.fill_format_type))
+    facts = {
         "visible": None if visible is None else bool(visible),
-        "solid": _win_constant(_WIN_FILL_TYPE, record.get(k.fill_format_type)) == msoFillSolid,
+        "solid": kind == msoFillSolid,
         "color_hex": rgb_list_to_hex(colour) if isinstance(colour, list) else None,
         "transparency": None if transparency is None else round(transparency, 2),
     }
+    if kind == msoFillGradient:
+        facts["gradient"] = _gradient_facts(shape.fill_format)
+    return facts
+
+
+def _gradient_facts(fill):
+    """The macOS half of ppt_com.layout_check._gradient_facts.
+
+    The stops come in one event. This dictionary has no angle for a gradient,
+    so it is None here, and the checks judge the text against the whole of it.
+    """
+    records = [r for r in elements(fill.gradient_stops.properties) if isinstance(r, dict)]
+    stops = []
+    for record in records:
+        colour = _value(record.get(k.color))
+        position = _value(record.get(k.position))
+        transparency = _value(record.get(k.transparency)) or 0.0
+        if not isinstance(colour, list) or position is None:
+            return None
+        stops.append([position, rgb_list_to_hex(colour), transparency])
+    if not stops:
+        return None
+    # Asked for in percent, answered in percent or as a fraction.
+    if max(stop[0] for stop in stops) > 1.0 + 1e-6:
+        stops = [[p / 100.0, c, t] for p, c, t in stops]
+    if max(stop[2] for stop in stops) > 1.0 + 1e-6:
+        stops = [[p, c, t / 100.0] for p, c, t in stops]
+    return {"angle": None, "stops": [[round(p, 4), c, round(t, 2)] for p, c, t in stops]}
 
 
 def _frame_state(frame: dict) -> dict:
@@ -273,8 +302,8 @@ def _read_appearance(facts, shape, full):
     return facts
 
 
-def _background_hex(slide, follows_master):
-    """The macOS half of ppt_com.layout_check._background_hex.
+def _background(slide, follows_master):
+    """The macOS half of ppt_com.layout_check._background.
 
     A background is a shape here, so its colour is that shape's fill.
     """
@@ -287,12 +316,32 @@ def _background_hex(slide, follows_master):
             if source.follow_master_background():
                 source = slide.slide_master
         fill = _record(source.background.fill_format)
-        if _win_constant(_WIN_FILL_TYPE, fill.get(k.fill_format_type)) == msoFillSolid:
+        kind = _win_constant(_WIN_FILL_TYPE, fill.get(k.fill_format_type))
+        if kind == msoFillSolid:
             colour = _value(fill.get(k.fore_color))
-            return rgb_list_to_hex(colour) if isinstance(colour, list) else None
+            return (rgb_list_to_hex(colour) if isinstance(colour, list) else None), None
+        if kind == msoFillGradient:
+            return None, _gradient_facts(source.background.fill_format)
     except Exception:
         logger.debug("Cannot read the slide background", exc_info=True)
-    return None
+    return None, None
+
+
+def _theme_colours(slide):
+    """The macOS half of ppt_com.layout_check._theme_colours.
+
+    The colours come in one event, and the reader asks once per master.
+    """
+    names = ("dark1", "light1", "dark2", "light2")
+    try:
+        scheme = slide.slide_master.theme.theme_color_scheme
+        values = scheme.theme_colors.RGB.get()
+        if not isinstance(values, list) or len(values) < 4:
+            values = [scheme.theme_colors[i].RGB() for i in range(1, 5)]
+        return {name: rgb_list_to_hex(value) for name, value in zip(names, values)}
+    except Exception:
+        logger.debug("Cannot read the theme's colours", exc_info=True)
+        return None
 
 
 def _template_facts(slide, shows, cache, touched=None):
@@ -369,6 +418,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     # Carried between calls only for a whole read, never a write's partial one.
     if detail is not None or template_cache is None:
         template_cache = {}
+    themes = template_cache.setdefault("theme colours", {})
     for slide_index in slide_indices:
         slide = _slide(pres, slide_index)
         if navigate:
@@ -398,14 +448,19 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         template, area = _template_facts(
             slide, None if shows is None else bool(shows), template_cache,
             None if detail is None else [s for s in shapes if s["name"] in detail])
+        background_hex, background_gradient = (
+            _background(slide, True if follows is None else bool(follows))
+            if needs_background(shapes, detail) else (None, None))
+        design = design_key(area)
+        if design not in themes:
+            themes[design] = _theme_colours(slide)
         facts["slides"].append({
             "slide_index": slide_index,
-            "design": design_key(area),
+            "design": design,
             "layout": _layout_name(own.get(k.layout)),
-            "background_hex": (
-                _background_hex(slide, True if follows is None else bool(follows))
-                if needs_background(shapes, detail) else None
-            ),
+            "background_hex": background_hex,
+            "background_gradient": background_gradient,
+            "theme_colors": themes[design],
             "follows_background": None if follows is None else bool(follows),
             "template": template,
             "template_area": area,

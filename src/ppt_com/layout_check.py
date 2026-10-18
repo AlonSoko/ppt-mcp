@@ -31,7 +31,7 @@ from utils.color import int_to_hex
 from utils.navigation import goto_slide
 from utils.offload import run_offloaded
 from ppt_com.constants import (
-    msoChart, msoEmbeddedOLEObject, msoFillSolid, msoGroup, msoLine,
+    msoChart, msoEmbeddedOLEObject, msoFillGradient, msoFillSolid, msoGroup, msoLine,
     msoLinkedOLEObject, msoLinkedPicture, msoMedia, msoPicture,
     msoPlaceholder, msoSmartArt, msoTable, msoTextBox, msoTrue,
     ppAlignCenter, ppAlignRight,
@@ -1570,25 +1570,21 @@ def _template_move(a, a_ink, union, named, shapes, graphics, layout):
             f"leaves {_pt(_CLEARANCE)} between it and {named}.")
 
 
-def _backdrop(shape, shapes, background_hex, template=()):
-    """The colour the shape's text is drawn on, and what paints it.
+def _backdrop(shape, shapes, background_hex, template=(), background_gradient=None,
+              slide_box=None):
+    """What the shape's text is drawn on, and what paints it.
 
-    The shape's own fill when it has a solid one, otherwise the nearest shape
+    The shape's own fill when it has one, otherwise the nearest shape
     underneath that holds the whole of the text and paints something, then a
     graphic of the template's that does, and otherwise the slide's background.
-    What paints it is "fill", "shape", "template" or "background", and the
-    shape or graphic that does, when one does. A picture, a gradient or a
-    see-through fill in the way means the colour is not one colour, so the
-    colour is None.
+    What it is drawn on is one colour, or a gradient across a box as
+    ``{"gradient": ..., "box": ...}``, since where on it the text sits decides
+    its colour there. A picture or a see-through fill in the way means it
+    cannot be told, and it is None. What paints it is "fill", "shape",
+    "template" or "background", and the shape or graphic that does, when one
+    does.
     """
-    def solid(fill):
-        if not fill or not fill.get("visible"):
-            return False, None
-        if not fill.get("solid") or (fill.get("transparency") or 0.0) > _OPAQUE_ENOUGH:
-            return True, None
-        return True, fill.get("color_hex")
-
-    painted, colour = solid(shape.get("fill"))
+    painted, colour = _paint(shape)
     if painted:
         return colour, "fill", shape
     words = text_box(shape)
@@ -1603,15 +1599,43 @@ def _backdrop(shape, shapes, background_hex, template=()):
                 continue
             if other["type"] in _UNKNOWN_BACKDROP_TYPES:
                 return None, source, other
-            painted, colour = solid(other.get("fill"))
+            painted, colour = _paint(other)
             if painted:
                 return colour, source, other
+    if background_gradient and slide_box and _opaque(background_gradient):
+        return {"gradient": background_gradient, "box": slide_box}, "background", None
     return background_hex, "background", None
 
 
+def _paint(shape):
+    """Whether the shape's fill paints, and with what: one colour, a gradient
+    across the shape's box, or None when that cannot be told."""
+    fill = shape.get("fill")
+    if not fill or not fill.get("visible"):
+        return False, None
+    if (fill.get("transparency") or 0.0) > _OPAQUE_ENOUGH:
+        return True, None
+    if fill.get("solid"):
+        return True, fill.get("color_hex")
+    gradient = fill.get("gradient")
+    if gradient and _opaque(gradient):
+        if _turned(shape):
+            # Turned with its shape, the gradient runs at an angle of its own.
+            gradient = {**gradient, "angle": None}
+        return True, {"gradient": gradient, "box": shape_box(shape)}
+    return True, None
+
+
+def _opaque(gradient) -> bool:
+    """Whether every stop of a gradient hides what is under it."""
+    stops = gradient.get("stops") or []
+    return bool(stops) and all((stop[2] or 0.0) <= _OPAQUE_ENOUGH for stop in stops)
+
+
 def _backdrop_colour(shape, shapes, background_hex, template=()):
-    """The colour the shape's text is drawn on, or None when it cannot be told."""
-    return _backdrop(shape, shapes, background_hex, template)[0]
+    """The one colour the shape's text is drawn on, or None when it is not one."""
+    colour = _backdrop(shape, shapes, background_hex, template)[0]
+    return colour if isinstance(colour, str) else None
 
 
 def _as_designed(shape, source, follows_background) -> bool:
@@ -1641,16 +1665,29 @@ def _as_designed(shape, source, follows_background) -> bool:
 
 
 def _low_contrast(slide_index, shapes, background_hex, template=(), follows_background=None,
-                  layout=None, trust_template=True):
+                  layout=None, trust_template=True, background_gradient=None, theme_colors=None):
     from ppt_com.themes import _contrast_ratio
 
+    # A theme whose own text colour does not read on its own background was
+    # changed by hand, and is no longer the template's design either.
+    trouble = _theme_trouble(theme_colors)
+    trust = trust_template and trouble is None
+    slide_box = None
+    if layout and layout.get("slide_width") and layout.get("slide_height"):
+        slide_box = (0.0, 0.0, layout["slide_width"], layout["slide_height"])
     findings = []
     for shape in shapes:
         text = shape.get("text")
         if not shape.get("visible", True) or not text or not text.get("chars"):
             continue
-        backdrop, painted_by, painter = _backdrop(shape, shapes, background_hex, template)
-        if not backdrop or (trust_template and _as_designed(shape, painted_by, follows_background)):
+        backdrop, painted_by, painter = _backdrop(shape, shapes, background_hex, template,
+                                                  background_gradient, slide_box)
+        if not backdrop or (trust and _as_designed(shape, painted_by, follows_background)):
+            continue
+        if isinstance(backdrop, dict):
+            found = _gradient_contrast(slide_index, shape, shapes, backdrop, painted_by, painter)
+            if found is not None:
+                findings.append(found)
             continue
         worst = None
         for run in text.get("runs") or []:
@@ -1682,11 +1719,12 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         on = ""
         fix = f"{recolour[0].upper()}{recolour[1:]}. Or change what is behind it."
         runs = text.get("runs") or []
-        if not trust_template and runs and all(run.get("theme") for run in runs):
-            # The theme's colours were just changed, and this text takes its
-            # colour from the theme: putting the theme right fixes every slide.
-            fix = (f"Its colour is the theme's: choose theme colours that read on each other "
-                   f"(ppt_set_theme_colors), or {recolour}.")
+        if not trust and runs and all(run.get("theme") for run in runs):
+            # The theme's colours were changed, and this text takes its colour
+            # from the theme: putting the theme right fixes every slide.
+            why = f", and {trouble}" if trouble else ""
+            fix = (f"Its colour is the theme's{why}: choose theme colours that read on each "
+                   f"other (ppt_set_theme_colors), or {recolour}.")
         elif painted_by == "template" and painter is not None:
             # Text the caller put on a band or panel of the template's: the
             # template keeps that place for itself, so off it is the better fix.
@@ -1729,6 +1767,161 @@ def _text_colours(shapes, exclude, size=None):
             seen[0] += alike
             seen[1] += 1
     return sorted(counts, key=lambda c: (-counts[c][0], -counts[c][1]))
+
+
+# A theme's text colour on its background colour, and its second pair, read
+# at least this well in every theme Office ships.
+_THEME_PAIRS = (("dark1", "light1", _CONTRAST_TEXT), ("dark2", "light2", _CONTRAST_LARGE))
+
+
+def _theme_trouble(colours):
+    """The pair of a theme's own colours that does not read, in words, or None."""
+    from ppt_com.themes import _contrast_ratio
+
+    for text, back, needed in _THEME_PAIRS:
+        a, b = (colours or {}).get(text), (colours or {}).get(back)
+        if a and b and _contrast_ratio(a, b) < needed:
+            return f"the theme's {text}, {a}, is {_contrast_ratio(a, b):.1f}:1 on its {back}, {b}"
+    return None
+
+
+def _gradient_contrast(slide_index, shape, shapes, paint, painted_by, painter):
+    """Text too faint on some of the gradient behind it, or None.
+
+    Where a linear gradient's angle is known, the colours behind the text are
+    those across the part of it the text covers. Otherwise the text could be
+    anywhere on it, and only text too faint on all of it is reported.
+    PowerPoint blends a theme's gradient straight across in sRGB, and one made
+    with a two-colour fill along a curve in linear light. Which a fill uses
+    cannot be read, so a verdict has to hold for both.
+    """
+    from ppt_com.themes import _contrast_ratio
+
+    stops = sorted(paint["gradient"]["stops"], key=lambda stop: stop[0])
+    words = text_box(shape)
+    span = _gradient_span(paint["box"], paint["gradient"].get("angle"), words) if words else None
+    blends = [_gradient_colours(stops, span, blend) for blend in (_blend_srgb, _blend_curve)]
+    worst = None
+    for run in shape["text"].get("runs") or []:
+        colour = run.get("color_hex")
+        if not colour:
+            continue
+        size = run.get("size") or 0.0
+        large = size >= _LARGE_TEXT or (run.get("bold") and size >= _LARGE_BOLD_TEXT)
+        needed = _CONTRAST_LARGE if large else _CONTRAST_TEXT
+        pick = min if span else max
+        # The kinder of the two blends: a finding has to hold for either.
+        ratio = max(pick(_contrast_ratio(colour, c) for c in colours) for colours in blends)
+        if ratio < needed and (worst is None or ratio / needed < worst[0] / worst[1]):
+            worst = (ratio, needed, colour, size)
+    if worst is None:
+        return None
+    ratio, needed, colour, size = worst
+    name = shape["name"]
+    ends = (_colour_at(stops, span[0], _blend_srgb), _colour_at(stops, span[1], _blend_srgb)) \
+        if span else (stops[0][1], stops[-1][1])
+    if painted_by == "background" or painter is None:
+        what = "the background's gradient"
+    elif painted_by == "fill":
+        what = "its own gradient fill"
+    elif painted_by == "template":
+        what = f"'{painter['name']}', a gradient of the template's"
+    else:
+        what = f"'{painter['name']}', a gradient"
+    if span:
+        on = f"on {what}, {ends[0]} to {ends[1]} behind it, a contrast of as little as {ratio:.1f}:1"
+    else:
+        on = f"on {what}, {ends[0]} to {ends[1]}, a contrast of at most {ratio:.1f}:1 anywhere on it"
+    # A colour that reads on every part of the gradient the text could be on.
+    everywhere = [c for colours in blends for c in colours]
+    ours = [c for c in _text_colours(shapes, shape, size)
+            if min(_contrast_ratio(c, b) for b in everywhere) >= needed]
+    choices = [(c, ", the colour of the other text on the slide") for c in ours[:1]] + [
+        (c, "") for c in ("#000000", "#FFFFFF")
+        if min(_contrast_ratio(c, b) for b in everywhere) >= needed]
+    if choices:
+        suggestion, source = choices[0]
+        least = min(_contrast_ratio(suggestion, b) for b in everywhere)
+        there = "there" if span else "anywhere on it"
+        fix = (f"Make the text {suggestion}{source} (contrast {least:.1f}:1 or more {there}): "
+               f"ppt_format_text color='{suggestion}'. Or put it on a card of its own colour.")
+    else:
+        fix = (f"No one colour reads on all of the gradient behind '{name}': put it on a card "
+               "of its own colour, or move it where the gradient is all dark or all light.")
+    return _finding(
+        slide_index, "low_contrast", [name],
+        f"Text in '{name}' is {colour} {on}, where {needed:g}:1 is the minimum for its size.",
+        fix, text_color=colour, backdrop_gradient=list(ends),
+        contrast=round(ratio, 2), minimum=needed,
+    )
+
+
+def _gradient_span(box, angle, words):
+    """The lowest and highest positions along a linear gradient that the words cover.
+
+    PowerPoint lays a linear gradient's angle across its box as if the box were
+    square, so its ends fall on the box's corners whatever the box's shape.
+    None when the gradient does not run in a line or its angle is unknown.
+    """
+    if angle is None:
+        return None
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0, y1 - y0
+    if width <= 0 or height <= 0:
+        return None
+    c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+    across = abs(c) + abs(s)
+    left, right = max(words[0], x0), min(words[2], x1)
+    top, bottom = max(words[1], y0), min(words[3], y1)
+    if right < left or bottom < top:
+        return None
+    ts = [((x - x0) / width - 0.5) * c / across + ((y - y0) / height - 0.5) * s / across + 0.5
+          for x in (left, right) for y in (top, bottom)]
+    return max(0.0, min(ts)), min(1.0, max(ts))
+
+
+def _gradient_colours(stops, span, blend):
+    """The colours a gradient takes over ``span``, or all of it when that is None."""
+    low, high = span if span else (0.0, 1.0)
+    positions = {low, high} | {stop[0] for stop in stops if low < stop[0] < high}
+    positions |= {low + (high - low) * i / 8 for i in range(1, 8)}
+    return [_colour_at(stops, t, blend) for t in sorted(positions)]
+
+
+def _colour_at(stops, t, blend):
+    """The colour of a gradient at position ``t``, its stops blended by ``blend``."""
+    if t <= stops[0][0]:
+        return stops[0][1]
+    for (p0, c0, _), (p1, c1, _) in zip(stops, stops[1:]):
+        if t <= p1:
+            return c0 if p1 - p0 < 1e-9 else blend(c0, c1, (t - p0) / (p1 - p0))
+    return stops[-1][1]
+
+
+def _channels(colour):
+    colour = colour.lstrip("#")
+    return [int(colour[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+def _blend_srgb(a, b, f):
+    """Straight across in sRGB, the way a theme's gradient is drawn."""
+    return "#" + "".join(f"{round(x + (y - x) * f):02X}"
+                         for x, y in zip(_channels(a), _channels(b)))
+
+
+def _blend_curve(a, b, f):
+    """Along an S-curve in linear light, the way a two-colour fill is drawn."""
+    def linear(v):
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    def encoded(v):
+        v = 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+        return round(min(max(v, 0.0), 1.0) * 255)
+
+    f = f * f * (3 - 2 * f)
+    return "#" + "".join(f"{encoded(linear(x) + (linear(y) - linear(x)) * f):02X}"
+                         for x, y in zip(_channels(a), _channels(b)))
 
 
 # Edge names per axis, in the order they are preferred when two tie.
@@ -2349,7 +2542,8 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _overlap(index, shapes, layout)
         + _template_collisions(index, shapes, template, layout, slide.get("template_area"))
         + _low_contrast(index, shapes, slide.get("background_hex"), template,
-                        slide.get("follows_background"), layout, trust_template)
+                        slide.get("follows_background"), layout, trust_template,
+                        slide.get("background_gradient"), slide.get("theme_colors"))
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
@@ -2875,7 +3069,30 @@ def _fill_facts(shape):
         facts["transparency"] = round(fill.Transparency, 2)
     except Exception:
         pass
+    try:
+        if fill.Type == msoFillGradient:
+            facts["gradient"] = _gradient_facts(fill)
+    except Exception:
+        pass
     return facts
+
+
+def _gradient_facts(fill):
+    """A gradient's stops, as [position 0..1, colour, transparency], and its
+    angle when it runs in a line: a gradient from the centre or a corner has
+    none, and asking for one fails."""
+    try:
+        stops = fill.GradientStops
+        listed = [[round(stops(i).Position, 4), int_to_hex(stops(i).Color.RGB),
+                   round(stops(i).Transparency, 2)] for i in range(1, stops.Count + 1)]
+    except Exception:
+        logger.debug("Cannot read a gradient's stops", exc_info=True)
+        return None
+    try:
+        angle = round(fill.GradientAngle, 2)
+    except Exception:
+        angle = None
+    return {"angle": angle, "stops": listed} if listed else None
 
 
 def _text_facts(shape, full):
@@ -3070,8 +3287,9 @@ def _on_touched(shape, touched) -> bool:
     return False
 
 
-def _background_hex(slide):
-    """The slide's background colour when it is one solid colour, else None.
+def _background(slide):
+    """The slide's background: its colour when it is one solid colour, and its
+    gradient when it is one, each None otherwise.
 
     A slide that follows its layout's background, which follows the master's,
     is painted by whichever of them stopped following.
@@ -3084,10 +3302,35 @@ def _background_hex(slide):
                 source = slide.Master
         fill = source.Background.Fill
         if fill.Type == msoFillSolid:
-            return int_to_hex(fill.ForeColor.RGB)
+            return int_to_hex(fill.ForeColor.RGB), None
+        if fill.Type == msoFillGradient:
+            return None, _gradient_facts(fill)
     except Exception:
         logger.debug("Cannot read the slide background", exc_info=True)
-    return None
+    return None, None
+
+
+def _theme_colours(slide, cache=None):
+    """The text and background colours of the slide's theme, by name.
+
+    Read once per design for a whole check, from ``cache``.
+    """
+    try:
+        key = ("theme colours", slide.Design.Index)
+    except Exception:
+        key = None
+    if cache is not None and key is not None and key in cache:
+        return cache[key]
+    try:
+        scheme = slide.Design.SlideMaster.Theme.ThemeColorScheme
+        colours = {name: int_to_hex(scheme(i).RGB)
+                   for i, name in ((1, "dark1"), (2, "light1"), (3, "dark2"), (4, "light2"))}
+    except Exception:
+        logger.debug("Cannot read the theme's colours", exc_info=True)
+        colours = None
+    if cache is not None and key is not None:
+        cache[key] = colours
+    return colours
 
 
 # Below anything on the slide itself, which counts from 1.
@@ -3235,13 +3478,15 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         except Exception:
             follows = None
         template = _template_facts(slide, touched, template_cache)
+        background_hex, background_gradient = (
+            _background(slide) if needs_background(shapes, detail) else (None, None))
         facts["slides"].append({
             "slide_index": slide_index,
             "design": design,
             "layout": layout,
-            "background_hex": (
-                _background_hex(slide) if needs_background(shapes, detail) else None
-            ),
+            "background_hex": background_hex,
+            "background_gradient": background_gradient,
+            "theme_colors": _theme_colours(slide, template_cache),
             "follows_background": follows,
             "template": template,
             "template_area": _template_area(slide, template, template_cache),

@@ -1513,6 +1513,108 @@ class TestAFontChange:
         assert kinds(check(box)) == ["overflow"]
 
 
+class TestTextInsideOtherText:
+    def test_a_label_inside_a_paragraphs_lines_is_moved_clear_of_all_of_them(self):
+        body = placed("body", 60, 120, 600, 200, 67.2, 123.6, 500, 150)
+        label = placed("label", 200, 160, 200, 30, 207.2, 163.6, 120, 22, z=2)
+        for order in ((body, label), (label, body)):
+            [found] = [f for f in check(*order) if f["type"] == "overlap"]
+            assert found["shapes"] == ["body", "label"]
+            # 6 pt above the paragraph's first line, not 6 pt past the label's own height.
+            assert "ppt_update_shape shape_names=['label'] dtop=-68" in found["fix"]
+
+
+# Slice's background as PowerPoint for Windows reports it. Its render matched
+# these colours, blended straight across in sRGB, to the unit.
+SLICE = {"angle": 102.0, "stops": [[0.1, "#64D4EF", 0.0], [1.0, "#06588E", 0.0]]}
+# Wisp's, a gradient from the centre: it has no angle.
+WISP = {"angle": None, "stops": [[0.0, "#FFFFFF", 0.0], [1.0, "#DFE8C4", 0.0]]}
+
+
+def on_gradient(*shapes, gradient=SLICE):
+    page = slide(*shapes, background=None)
+    page["background_gradient"] = gradient
+    return page
+
+
+def contrast(page):
+    return [f for f in slide_findings(page, W, H) if f["type"] == "low_contrast"]
+
+
+def words(name, left, top, colour, size=12.0, z=1):
+    return textbox(name, left, top, 200, 24, z=z, text_width=150, text_height=15,
+                   runs=[{"color_hex": colour, "size": size, "bold": False}])
+
+
+class TestTextOnAGradient:
+    def test_a_grey_note_on_the_deep_blue_is_reported(self):
+        # Live: the source note at the foot of a Slice slide, all but unreadable.
+        [found] = contrast(on_gradient(words("note", 740, 485, "#595959")))
+        assert found["message"].startswith("Text in 'note' is #595959 on the background's gradient, ")
+        assert "behind it, a contrast of as little as" in found["message"]
+        assert "ppt_format_text color='#FFFFFF'" in found["fix"]
+
+    def test_white_on_the_deep_blue_reads(self):
+        assert contrast(on_gradient(words("title", 60, 470, "#FFFFFF", size=28.0))) == []
+
+    def test_white_on_the_pale_top_does_not(self):
+        [found] = contrast(on_gradient(words("title", 60, 30, "#FFFFFF", size=28.0)))
+        assert found["shapes"] == ["title"]
+
+    def test_a_card_filled_with_a_gradient_is_judged_where_the_words_are(self):
+        # Black to white, left to right, as ppt_set_fill makes a two-colour fill.
+        fill = {"visible": True, "solid": False, "color_hex": "#000000", "transparency": 0.0,
+                "gradient": {"angle": 0.0, "stops": [[0.0, "#000000", 0.0], [1.0, "#FFFFFF", 0.0]]}}
+        panel = shape("panel", 100, 100, 600, 200, z=1, fill=fill, line=False)
+        dark_end = words("dark end", 110, 150, "#333333", size=20.0, z=2)
+        light_end = words("light end", 490, 150, "#333333", size=20.0, z=3)
+        assert [f["shapes"] for f in contrast(slide(panel, dark_end, light_end))] == [["dark end"]]
+
+    def test_where_the_two_blends_disagree_nothing_is_reported(self):
+        # A quarter of the way along black to white: about #404040 blended in
+        # sRGB, about #707070 along the curve. White reads on the one, not the
+        # other, so neither verdict can be stood behind.
+        fill = {"visible": True, "solid": False, "color_hex": "#000000", "transparency": 0.0,
+                "gradient": {"angle": 0.0, "stops": [[0.0, "#000000", 0.0], [1.0, "#FFFFFF", 0.0]]}}
+        panel = shape("panel", 0, 100, 800, 200, z=1, fill=fill, line=False)
+        assert contrast(slide(panel, words("w", 190, 150, "#FFFFFF", z=2))) == []
+
+    def test_without_an_angle_only_text_unreadable_anywhere_on_it_is_reported(self):
+        page = on_gradient(words("white", 300, 200, "#FFFFFF", size=28.0),
+                           words("grey", 300, 300, "#595959", z=2), gradient=WISP)
+        [found] = contrast(page)
+        assert found["shapes"] == ["white"] and "anywhere on it" in found["message"]
+
+    def test_a_see_through_gradient_is_no_verdict(self):
+        clear = {"angle": 90.0, "stops": [[0.0, "#000000", 0.6], [1.0, "#000000", 0.6]]}
+        assert contrast(on_gradient(words("w", 300, 200, "#111111"), gradient=clear)) == []
+
+
+OFFICE = {"dark1": "#000000", "light1": "#FFFFFF", "dark2": "#0E2841", "light2": "#E8E8E8"}
+
+
+class TestAThemeChangedByHand:
+    # ppt_set_theme_colors light1='#111827': the background goes dark, the
+    # titles stay black in dark1, and a check run later should still see it.
+    def page(self, theme):
+        title = title_placeholder(colour="#000000")
+        page = templated(title, background="#111827")
+        page["theme_colors"] = theme
+        return page
+
+    def test_a_theme_whose_text_colour_does_not_read_on_its_background_is_not_trusted(self):
+        [found] = contrast(self.page({**OFFICE, "light1": "#111827"}))
+        assert found["shapes"] == ["Title 1"]
+        assert found["fix"].startswith(
+            "Its colour is the theme's, and the theme's dark1, #000000, is 1.2:1 on its "
+            "light1, #111827: choose theme colours that read on each other (ppt_set_theme_colors)")
+
+    def test_a_theme_as_shipped_is_still_trusted(self):
+        # Whatever is drawn behind the title, the template designed it.
+        assert contrast(self.page(OFFICE)) == []
+        assert contrast(self.page(None)) == []
+
+
 class TestContrastSuggestions:
     def test_body_text_takes_the_colour_of_body_text(self):
         headings = [textbox(f"h{i}", 60 + 300 * i, 150, 240, 36, z=1 + i,
