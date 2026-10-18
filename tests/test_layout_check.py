@@ -1174,6 +1174,44 @@ class TestARightToLeftDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+class TestARightToLeftDeckOnMac:
+    # The Hebrew deck again, on PowerPoint for Mac, with a ninth slide on the
+    # layout's own title and body: a two-line title in the title placeholder
+    # among titles drawn as boxes, and fourteen bullets PowerPoint shrank to
+    # fit. PowerPoint for Mac reports that title's lines 11 pt wider than it
+    # draws them, past both of the frame's insets.
+    SEEN = {
+        1: [], 2: [], 3: [], 4: [], 5: [], 6: [],
+        7: [("uneven_spacing", "Shape_5")],             # cards 32 and 20 pt apart, as on Windows
+        8: [],
+        9: [],                                          # the title fits; the bullets were shrunk
+    }
+
+    def test_each_slide_reports_what_its_screenshot_shows(self):
+        assert findings_by_slide(recorded("rtldeck_broken_mac")) == self.SEEN
+
+    def test_the_first_eight_slides_agree_with_windows(self):
+        def found(name):
+            deck = recorded(name)
+            return {s["slide_index"]: kinds(slide_findings(s, deck["slide_width"], deck["slide_height"]))
+                    for s in deck["slides"] if s["slide_index"] <= 8}
+        assert found("rtldeck_broken_mac") == found("rtldeck_broken_win")
+
+    def test_the_placeholder_title_is_held_to_the_drawn_ones(self):
+        deck = recorded("rtldeck_broken_mac")
+        found = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert {f["message"].split(":")[0] for f in found} == {
+            f"Slide titles differ in {what}"
+            for what in ("size", "right edge", "alignment", "weight", "font", "colour")
+        }
+        assert all(f["slides"] == ([6] if "alignment" in f["message"] else [9]) for f in found)
+
+    def test_the_fixed_deck_is_clean(self):
+        fixed = recorded("rtldeck_fixed_mac")
+        assert all(found == [] for found in findings_by_slide(fixed).values())
+        assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+
+
 class TestADeckOnTwoDesigns:
     # Office Theme on slides 1-3 and Retrospect on 4-5, on Windows. Each design
     # has a "Title Only" layout of its own, and each styles its title its own
@@ -1344,6 +1382,35 @@ class TestCollisions:
         [finding] = [f for f in check(table, caption) if f["type"] == "overlap"]
         assert finding["fix"].startswith("Move 'caption' down by ")
         assert "6 pt between it and 'table'" in finding["fix"]
+
+
+class TestRightToLeftText:
+    # PowerPoint reports the lines of Hebrew text wider than it draws them: a
+    # right-set title to the frame's edge rather than its inset on Windows, a
+    # two-line placeholder title 11 pt past both insets on the Mac.
+    def test_wrapped_text_is_held_to_its_frames_insets(self):
+        title = placed("Title 3", 66, 28.75, 828, 104.38, 62.19, 33.42, 830.26, 95.04)
+        title["text"]["word_wrap"] = True
+        assert layout_check.text_box(title) == (73.2, 33.42, 886.8, 128.46)
+
+    def test_so_a_placeholder_title_keeps_the_margin_it_is_drawn_at(self):
+        title = placed("Title 3", 66, 28.75, 828, 104.38, 62.19, 33.42, 830.26, 95.04)
+        body = placed("Content 4", 66, 143.75, 828, 342.63, 91.2, 147.35, 290.51, 307.1, z=2)
+        assert [f for f in check(title, body) if f["type"] == "narrow_margin"] == []
+
+    def test_text_that_does_not_wrap_is_where_it_is_reported(self):
+        line = placed("line", 66, 30, 300, 40, 60, 33.6, 320, 30)
+        line["text"]["word_wrap"] = False
+        assert layout_check.text_box(line)[0] == 60
+
+    def test_a_margin_fix_moves_the_frame_by_what_its_text_needs(self):
+        # Text poking 4 pt out of the left of a frame set at the margin.
+        words = placed("words", 66, 200, 300, 40, 62, 203.6, 200, 30)
+        words["text"]["word_wrap"] = False
+        other = placed("other", 66, 100, 828, 40, 73.2, 103.6, 300, 30, z=2)
+        [found] = [f for f in check(words, other) if f["type"] == "narrow_margin"]
+        assert found["fix"].startswith("Move 'words' right by")
+        assert "by 0 pt" not in found["fix"]
 
 
 class TestATableThatGrows:
@@ -1810,6 +1877,13 @@ class TestATemplatesTitles:
         for page in slides:
             page["design"] = None
         assert deck_findings(slides, H, W) != []
+
+    def test_on_a_mac_a_master_is_told_by_where_it_puts_its_title_and_body(self):
+        office = [[66, 28.75, 894, 133.13], [66, 143.75, 894, 486.38]]
+        retro = [[93.6, 39.6, 866.4, 136.8], [93.6, 162, 866.4, 478]]
+        key = layout_check.design_key
+        assert key(office) == key(list(reversed(office))) != key(retro)
+        assert key([]) is None and key(None) is None
 
     def test_a_title_low_in_a_tall_frame_is_anchored_not_moved_off_the_slide(self):
         def boxed(index, frame_top, text_top):

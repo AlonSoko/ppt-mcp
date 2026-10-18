@@ -275,6 +275,10 @@ def text_box(shape):
     width and height inside the box. Overflowing text is placed the way
     PowerPoint draws it, past the bottom for a top anchor, past both edges for
     a middle one.
+
+    Wrapped lines end at the frame's insets, whatever PowerPoint reports: for
+    right-to-left text, Hebrew or Arabic, it reports lines up to 11 pt wider
+    than it draws them, past the inset and even past the frame.
     """
     text = shape.get("text")
     if not text or not text.get("chars"):
@@ -283,7 +287,15 @@ def text_box(shape):
     if width is None or height is None:
         return None
     if text.get("left") is not None and text.get("top") is not None:
-        return _box(text["left"], text["top"], width, height)
+        left, right = text["left"], text["left"] + width
+        margins = text.get("margins")
+        if (margins and text.get("word_wrap") is not False and not _turned(shape)
+                and text.get("orientation") in (None, "horizontal")):
+            inner_left = shape["left"] + margins["left"]
+            inner_right = shape["left"] + shape["width"] - margins["right"]
+            if max(left, inner_left) < min(right, inner_right):
+                left, right = max(left, inner_left), min(right, inner_right)
+        return _box(left, text["top"], right - left, height)
 
     margins = text.get("margins") or _DEFAULT_MARGINS
     inner_left = shape["left"] + margins["left"]
@@ -2238,9 +2250,11 @@ def _narrow_margins(slide_index, layout, slide_w):
                        f"narrower and move it to the margin (ppt_update_shape "
                        f"left={_num(side)} width={_num(slide_w - 2 * side)}).")
             elif fix is None:
-                left = min(max(box[0], side), slide_w - side - _width(box))
-                fix = (f"Move '{name}' {'right' if left > box[0] else 'left'} by "
-                       f"{_pt(abs(left - box[0]))} (ppt_update_shape left={_num(left)}).")
+                # What came too near is the ink, which for text is not always
+                # the frame: the frame moves by what its text needs.
+                by = min(max(ink[0], side), slide_w - side - _width(ink)) - ink[0]
+                fix = (f"Move '{name}' {'right' if by > 0 else 'left'} by "
+                       f"{_pt(abs(by))} (ppt_update_shape left={_num(box[0] + by)}).")
             findings.append(_finding(
                 slide_index, "narrow_margin", [name],
                 f"'{name}' comes within {_pt(distance)} of the {edge} edge of "
@@ -2552,10 +2566,12 @@ def deck_findings(slides, slide_h, slide_w=None):
         values = [(index, read(shape)) for index, shape in titled
                   if read(shape) is not None and not (field and index in elsewhere)
                   and (field in (None, "top") or side[index] in (field, "full"))]
-        groups = _clusters(values, tolerance)
-        if len(groups) < 2:
+        usual, rest = _usual_group(values, tolerance)
+        # A value no two titles share is no usual value to hold the rest to:
+        # a left-set title beside one placeholder title is two odd ones out.
+        if len(usual) < 2 or not rest:
             continue
-        usual = groups[0]
+        groups = [usual] + _clusters(rest, tolerance)
         members = [j for j, _ in usual]
         groups = [usual] + [kept for kept in (
             [(i, v) for i, v in g if held(i, members)] for g in groups[1:]) if kept]
@@ -2616,6 +2632,19 @@ def deck_findings(slides, slide_h, slide_w=None):
     return findings
 
 
+def design_key(area):
+    """A name for a slide's master, for PowerPoint for Mac, which names none.
+
+    It answers no name for a design, a master or a layout. Where a master
+    puts its title and body is what decides how its titles are set, so that
+    stands for it, and two designs in one deck are told apart. ``area`` is the
+    master's title and body placeholders, as ``template_area`` holds them.
+    """
+    if not area:
+        return None
+    return "master " + " ".join(",".join(f"{v:g}" for v in box) for box in sorted(area))
+
+
 def _template_title(title) -> bool:
     """Whether a title is a placeholder still in the template's own colours."""
     runs = (title.get("text") or {}).get("runs") or []
@@ -2625,8 +2654,27 @@ def _template_title(title) -> bool:
 
 def _usual(values):
     """The middle of the largest group of (slide, value) pairs that agree."""
-    group = _clusters(values, _NEAR_MISS)[0]
+    group = _usual_group(values, _NEAR_MISS)[0]
     return sorted(v for _, v in group)[len(group) // 2]
+
+
+def _usual_group(values, tolerance):
+    """The (slide, value) pairs within ``tolerance`` of the value the most of
+    them are near, and the rest.
+
+    Gathered around a middle rather than from the lowest value up, the titles
+    split the same way whichever of them happens to be lowest: titles at
+    33.4, 33.6 and 37.6 pt are one group around 33.6, where counting from
+    33.4 would leave 37.6 out.
+    """
+    def near(centre):
+        return [pair for pair in values if abs(pair[1] - centre) <= tolerance]
+
+    if not values:
+        return [], []
+    centre = max(sorted({value for _, value in values}),
+                 key=lambda c: (len(near(c)), -sum(abs(v - c) for _, v in near(c))))
+    return near(centre), [pair for pair in values if abs(pair[1] - centre) > tolerance]
 
 
 def _title_side(title):
@@ -3415,8 +3463,9 @@ def register_tools(mcp):
 
         - off_slide: a shape, or its text, reaches past a slide edge
         - overflow: text needs more room than its box gives it
-        - overlap: text runs into another shape or other text, or something
-          the slide added runs into the template's own logo, band or footer
+        - overlap: text runs into another shape or other text, lies on a
+          table's cells or is hidden under a card, or something the slide
+          added runs into the template's own logo, band or footer
         - low_contrast: text colour against what is behind it is below the
           WCAG minimum for its size
         - cramped_text: text on a card pressed against one of its edges

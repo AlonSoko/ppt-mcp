@@ -359,7 +359,7 @@ def _layout_name(word):
 
 
 def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
-    from ppt_com.layout_check import needs_background, read_shapes
+    from ppt_com.layout_check import design_key, needs_background, read_shapes
     from ppt_mac.layout import _slide_dimensions
 
     app = ppt._get_app_impl()
@@ -400,6 +400,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             None if detail is None else [s for s in shapes if s["name"] in detail])
         facts["slides"].append({
             "slide_index": slide_index,
+            "design": design_key(area),
             "layout": _layout_name(own.get(k.layout)),
             "background_hex": (
                 _background_hex(slide, True if follows is None else bool(follows))
