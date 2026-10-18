@@ -2032,6 +2032,37 @@ class TestATemplatesTitles:
         assert "top=-" not in top["fix"]
 
 
+class TestBarsOfAChart:
+    # Live, the beer deck: a bar chart drawn from rounded rectangles, one per
+    # country, each as long as its value. Their widths are the data.
+    def bars(self, *values):
+        return [card(f"bar{i}", 246, 144 + 52 * i, v / 150 * 540, 30, z=1 + i)
+                for i, v in enumerate(values)]
+
+    def test_bars_that_shrink_in_order_are_a_chart(self):
+        assert "uneven_sizes" not in kinds(check(*self.bars(110.6, 104.6, 99.0, 95.1, 93.2)))
+
+    def test_bars_that_grow_in_order_are_a_chart(self):
+        assert "uneven_sizes" not in kinds(check(*self.bars(93.2, 95.1, 99.0, 104.6)))
+
+    def test_one_card_off_the_rest_is_still_a_slip(self):
+        assert "uneven_sizes" in kinds(check(*self.bars(100, 100, 104, 100)))
+
+    def test_sizes_out_of_order_are_still_a_slip(self):
+        assert "uneven_sizes" in kinds(check(*self.bars(100, 104, 99, 103)))
+
+
+class TestADesignedDeckOnTheMac:
+    # Twelve slides on beer, built on PowerPoint for Mac through the server:
+    # photos, icons, cards with shadows, a timeline, a colour scale, and a bar
+    # chart drawn from shapes. Every finding the checks made while it was
+    # built was fixed, so it must report nothing.
+    def test_the_finished_deck_is_clean(self):
+        deck = recorded("beerdeck_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
 class TestUnevenWidths:
     def row(self, *widths, colours=None):
         shapes, left = [], 99.0

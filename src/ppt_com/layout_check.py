@@ -2285,6 +2285,8 @@ def _uneven_sizes(slide_index, layout):
                 continue
             if _featured(names, sizes, layout):
                 continue
+            if _graded(names, sizes):
+                continue
             clusters = sorted(
                 _clusters(list(sizes.items()), _SIZE_TOLERANCE),
                 key=lambda g: -max(v for _, v in g),
@@ -2304,6 +2306,22 @@ def _uneven_sizes(slide_index, layout):
                 sizes_pt={name: round(size, 1) for name, size in sizes.items()},
             ))
     return findings + _uneven_along(slide_index, layout, seen)
+
+
+def _graded(names, sizes) -> bool:
+    """Whether like shapes step through their sizes on purpose.
+
+    A slip is one card off the size the rest share. The bars of a chart drawn
+    from shapes, a ranking or a funnel share no size at all: three or more of
+    them, every one a different size, growing or shrinking in order from the
+    first to the last. Their sizes are what they show.
+    """
+    if len(names) < 3:
+        return False
+    ordered = [sizes[name] for name in names]
+    steps = [b - a for a, b in zip(ordered, ordered[1:])]
+    return (all(step > _SIZE_TOLERANCE for step in steps)
+            or all(step < -_SIZE_TOLERANCE for step in steps))
 
 
 def _uneven_along(slide_index, layout, seen):
