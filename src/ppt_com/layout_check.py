@@ -3054,18 +3054,21 @@ def register_tools(mcp):
         - sample_text: text a template or a draft left to be replaced, such
           as lorem ipsum, "Your title here", "[Company name]" or "XX%"
         - inconsistent_titles (whole deck only): titles that differ in size,
-          position, weight, typeface or colour from slide to slide; the
-          title each layout of a template styles for itself is left as it is
+          position, alignment, weight, typeface or colour from slide to slide;
+          a right-set title is placed by its right edge, and the title each
+          layout of a template styles for itself is left as it is
 
         Run it when a slide is finished, and on the whole deck before calling
         it done. A slide with no issues is finished as far as geometry goes;
         ppt_get_slide_preview is still the way to judge how it looks, and
         ppt_check_typography covers line breaks.
 
-        The tools that add, move, resize or retext a shape run the per shape
-        checks on that shape themselves and report what they find in
-        ``layout_issues``. No ``layout_issues`` means it was checked and is
-        fine; ``layout_check_failed`` means the check could not run.
+        The tools that add, copy, move, resize or retext a shape, or fill a
+        placeholder, run the per shape checks on that shape themselves and
+        report what they find in ``layout_issues``; a new slide background
+        reports the text it left hard to read. No ``layout_issues`` means it
+        was checked and is fine; ``layout_check_failed`` means the check could
+        not run.
         """
         return await run_offloaded(check_layout, params)
 
