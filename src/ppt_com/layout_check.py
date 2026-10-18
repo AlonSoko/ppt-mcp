@@ -2911,13 +2911,39 @@ def report_layout(result: dict, slide_index: int, shape_names) -> dict:
     return result
 
 
+def report_contrast(result: dict, slide_indices) -> dict:
+    """Add the text a background change left hard to read, on each slide it changed.
+
+    A new background touches no shape, but every line of text on the slide is
+    now drawn on it, so only the contrast check is run, over the whole slide.
+    """
+    if not isinstance(result, dict) or "error" in result or not slide_indices:
+        return result
+    issues = []
+    try:
+        cache = {}
+        for slide_index in slide_indices:
+            facts = ppt.execute(_slide_facts_impl, [slide_index], False, None, cache)
+            slide = facts["slides"][0]
+            issues += [f for f in slide_findings(slide, facts["slide_width"], facts["slide_height"])
+                       if f["type"] == "low_contrast"]
+    except Exception as e:  # noqa: BLE001 - the write itself already succeeded
+        logger.debug("Contrast check after a background change failed", exc_info=True)
+        result["layout_check_failed"] = str(e)
+        return result
+    if issues:
+        result["layout_issues"] = issues
+    return result
+
+
 def touched_names(result: dict) -> list:
     """The shape names a write tool's result reports, one or several."""
     if not isinstance(result, dict):
         return []
     names = []
-    if result.get("shape_name"):
-        names.append(result["shape_name"])
+    for key in ("shape_name", "new_shape_name", "placeholder_name"):
+        if result.get(key):
+            names.append(result[key])
     for entry in result.get("updated") or []:
         if isinstance(entry, dict) and entry.get("shape_name"):
             names.append(entry["shape_name"])

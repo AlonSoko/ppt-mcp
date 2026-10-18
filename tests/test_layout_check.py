@@ -1717,3 +1717,45 @@ class TestAWritesUnreadGraphics:
         assert found["fix"].startswith("Move 'note' up by")
         [found] = overlaps(check_on([band], note))
         assert found["fix"].startswith("Move 'note' down by")
+
+
+# ---------------------------------------------------------------------------
+# Which writes report, read with ast so it runs anywhere
+# ---------------------------------------------------------------------------
+import ast  # noqa: E402
+
+REPORTING = {
+    "shapes.py": ["add_shape", "add_textbox", "add_picture", "update_shape", "duplicate_shape"],
+    "text.py": ["set_text", "format_text", "format_text_range", "set_textframe"],
+    "advanced_ops.py": ["add_svg_icon"],
+    "layout.py": ["align_shapes", "distribute_shapes", "set_slide_background"],
+    "placeholders.py": ["set_placeholder_text"],
+    "tables.py": ["add_table"],
+    "charts.py": ["add_chart"],
+    "edit_ops.py": ["copy_shape_to_slide"],
+}
+
+
+class TestWhichWritesReport:
+    @pytest.mark.parametrize("module, function", [
+        (module, function) for module, functions in REPORTING.items() for function in functions])
+    def test_the_write_reports_what_it_left_wrong(self, module, function):
+        path = Path(__file__).resolve().parents[1] / "src" / "ppt_com" / module
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        [node] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function]
+        called = {c.func.id for c in ast.walk(node)
+                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+        assert called & {"report_layout", "report_contrast"}
+
+    def test_a_copy_or_a_placeholder_is_named_by_its_own_key(self):
+        assert touched_names({"new_shape_name": "Card copy"}) == ["Card copy"]
+        assert touched_names({"placeholder_name": "Title 1"}) == ["Title 1"]
+
+    def test_a_new_background_reports_only_the_text_it_left_hard_to_read(self, monkeypatch):
+        grey = textbox("grey", 100, 100, 300, 40,
+                       runs=[{"color_hex": "#555555", "size": 20.0, "bold": False}])
+        stray = card("stray", 900, 100, 200, 50, z=2)   # off the slide, but not this call's business
+        fake = FakeDeck([slide(grey, stray, background="#333333")])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = layout_check.report_contrast({"success": True, "slide_indices": [1]}, [1])
+        assert [(f["type"], f["shapes"]) for f in result["layout_issues"]] == [("low_contrast", ["grey"])]

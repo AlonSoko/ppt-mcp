@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 
 from utils.offload import run_offloaded
 from backend import ppt
+from ppt_com.layout_check import report_layout, touched_names
 from utils.color import hex_to_int, int_to_hex
 from utils.navigation import goto_slide
 from utils.validation import font_size_warning
@@ -800,6 +801,7 @@ def add_table(params: AddTableInput) -> str:
             params.left, params.top, params.width, params.height,
             params.row_heights, params.col_widths,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add table: {str(e)}"})

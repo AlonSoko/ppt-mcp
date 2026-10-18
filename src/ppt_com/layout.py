@@ -22,7 +22,7 @@ from ppt_com.constants import (
     VIEW_TYPE_NAMES,
 )
 from ppt_com.shape_lookup import require_top_level, resolve_shape as _get_shape
-from ppt_com.layout_check import report_layout
+from ppt_com.layout_check import report_contrast, report_layout
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +590,8 @@ def set_slide_background(params: SetSlideBackgroundInput) -> str:
             params.image_path, params.transparency,
             params.slide_indices,
         )
+        if isinstance(result, dict):
+            report_contrast(result, result.get("slide_indices") or [])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set slide background: {str(e)}"})

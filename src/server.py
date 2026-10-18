@@ -287,6 +287,7 @@ mcp = _PowerPointServer(
 4. After placing text, set fonts explicitly with `ppt_batch_apply_formatting` or `ppt_set_default_fonts`. On Japanese-locale systems, the slide master default is often 游ゴシック, which renders thin and illegible when projected. """ + _PREFERRED_FONTS + """
 5. For visual symbols, `ppt_search_icons` + `ppt_add_svg_icon` produce crisper, scalable results than emoji characters and are generally preferred in presentations.
 6. Use `ppt_get_slide_preview` to visually inspect slides as you work.
+7. The tools that add, move, resize or retext a shape check what they touched and report any problem in their result under `layout_issues`, each with a `fix` naming the call and its values: act on them before moving on. When a slide is finished, run `ppt_check_layout` on it, and before calling the deck done, run it once more with no `slide_index`, which also compares the titles across slides. A slide is done when it reports no issues. The check measures rather than looks, so it works with or without image input.
 
 ## Key tools
 

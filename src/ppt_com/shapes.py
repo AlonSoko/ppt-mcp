@@ -1673,6 +1673,7 @@ def duplicate_shape(params: ShapeIdentifierInput) -> str:
             _duplicate_shape_impl,
             params.slide_index, params.shape_name, params.shape_index,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to duplicate shape: {str(e)}"})
