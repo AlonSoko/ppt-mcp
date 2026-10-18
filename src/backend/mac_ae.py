@@ -27,6 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import Future
@@ -183,6 +184,41 @@ def shapes_of(container) -> list:
     return positional(container.shapes)
 
 
+class StagingBlocked(PermissionError):
+    """macOS will not let this process into PowerPoint's container."""
+
+
+def staging_dir(folder: Optional[str] = None) -> str:
+    """PowerPoint's container, checked to be writable, for a file to pass through.
+
+    Since macOS 14 one app's container is closed to every other app unless the
+    user consents, and the consent is asked of the app that started this
+    server: Terminal, an editor, Claude. Launched from a terminal, macOS may
+    refuse without ever asking, and every picture, icon, template, theme,
+    preview and export then fails with a bare "Operation not permitted". A
+    probe file proves the way in, so the failure says what to do instead.
+
+    ``folder`` is the caller's own name for the container, EXPORT_STAGING_DIR.
+    """
+    folder = folder or EXPORT_STAGING_DIR
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".ppt_mcp_probe_"):
+            pass
+    except PermissionError as e:
+        raise StagingBlocked(
+            f"macOS is keeping ppt-mcp out of PowerPoint's own folder, {folder}. "
+            "PowerPoint for Mac is sandboxed, so every file it reads or writes for this "
+            "server (a picture, an icon, a template or theme, a preview, an export, a "
+            "saved copy) passes through that folder, and since macOS 14 another app may "
+            "only enter it with the user's consent. Give the app that started this "
+            "server, such as Terminal, iTerm, VS Code or Claude, Full Disk Access in "
+            "System Settings > Privacy & Security > Full Disk Access, then try again. "
+            "Shapes, text, tables and charts work without it."
+        ) from e
+    return folder
+
+
 def stage_into_container(path: str) -> str:
     """Copy a file into PowerPoint's container and return the copy's path.
 
@@ -196,8 +232,7 @@ def stage_into_container(path: str) -> str:
     The caller is responsible for removing the copy once PowerPoint has read
     it, where the thing being read is embedded rather than linked.
     """
-    os.makedirs(EXPORT_STAGING_DIR, exist_ok=True)
-    staged = os.path.join(EXPORT_STAGING_DIR, os.path.basename(path))
+    staged = os.path.join(staging_dir(), os.path.basename(path))
     if os.path.abspath(staged) != os.path.abspath(path):
         shutil.copy2(path, staged)
     return staged

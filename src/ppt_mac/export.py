@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from typing import List, Optional
 
-from backend.mac_ae import EXPORT_STAGING_DIR, count, mactypes, ppt
+from backend.mac_ae import EXPORT_STAGING_DIR, count, mactypes, ppt, staging_dir
 from backend.mac_enums import PpSaveAsFileType, to_keyword
 from ppt_com.constants import ppSaveAsPDF
 
@@ -45,7 +45,7 @@ def _staging_path(suffix: str) -> str:
     Anywhere else risks the sandbox stall that kills the application, so no
     export is ever pointed straight at the caller's directory.
     """
-    os.makedirs(EXPORT_STAGING_DIR, exist_ok=True)
+    staging_dir(EXPORT_STAGING_DIR)
     handle, path = tempfile.mkstemp(
         prefix="ppt_mcp_export_", suffix=suffix, dir=EXPORT_STAGING_DIR
     )

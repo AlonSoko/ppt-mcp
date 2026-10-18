@@ -55,6 +55,7 @@ from appscript.reference import CommandError
 
 from backend.mac_ae import (
     EXPORT_STAGING_DIR,
+    staging_dir,
     count,
     count_of,
     is_missing,
@@ -181,7 +182,7 @@ def _staged_file(suffix: str) -> str:
     allowed, so a temp file in the system temp directory is not good enough.
     POSIX paths only; an HFS colon path is read as a literal filename.
     """
-    os.makedirs(EXPORT_STAGING_DIR, exist_ok=True)
+    staging_dir(EXPORT_STAGING_DIR)
     handle, path = tempfile.mkstemp(
         prefix="ppt_mcp_media_", suffix=suffix, dir=EXPORT_STAGING_DIR
     )

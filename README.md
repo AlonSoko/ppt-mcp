@@ -44,7 +44,13 @@ https://github.com/user-attachments/assets/178b9b5b-624d-4de0-a1dd-619dc13d4bd7
 
 On macOS the server drives PowerPoint over Apple Events instead of COM. The
 first tool call raises the system's automation prompt, and PowerPoint has to be
-allowed there once. See [macOS support](#-macos-support) for what differs.
+allowed there once. Pictures, icons, templates, themes, previews and exports
+pass through PowerPoint's own folder, which macOS 14 and later keeps other apps
+out of, so the application that launches the server (Terminal, an editor,
+Claude) needs Full Disk Access for those tools. Run from a terminal, macOS may
+refuse without asking; the tools then say what to grant. Shapes, text, tables
+and charts work regardless. See [macOS support](#-macos-support) for what
+differs.
 
 ## 🚀 Getting Started
 
