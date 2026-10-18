@@ -173,7 +173,7 @@ _OPAQUE_TYPES = frozenset({
 # contrast verdict.
 _UNKNOWN_BACKDROP_TYPES = frozenset({
     msoPicture, msoLinkedPicture, msoChart, msoGroup, msoMedia, msoSmartArt,
-    msoEmbeddedOLEObject, msoLinkedOLEObject,
+    msoEmbeddedOLEObject, msoLinkedOLEObject, msoTable,
 })
 
 # The finding types the write tools report on the shape they touched. The rest
@@ -401,6 +401,9 @@ def _belongs_to(s, other, boxes) -> bool:
     on, so a frame that only holds text belongs to a shape that paints, at any
     size.
     """
+    if other["type"] == msoTable:
+        # Its cells hold their own text; a text box over them is in the way.
+        return False
     mine, theirs = boxes[s["name"]], boxes[other["name"]]
     width, height = _shared(mine, theirs)
     if width * height < 0.5 * _width(mine) * _height(mine):
@@ -975,7 +978,9 @@ def _overlap(slide_index, shapes, layout):
     Only text is judged. Two filled shapes crossing may be a Venn diagram or a
     badge on a card, and nothing about the slide says which, but text drawn
     over something, or under it, is never meant. Text that sits wholly inside
-    another shape is on it, like the words on a card, and is fine.
+    another shape is on it, like the words on a card, and is fine, unless the
+    shape is a table, whose cells hold text of their own, or a card laid in
+    front of it, which hides it.
 
     Text running into several cards of one row is one finding, not one per
     card: a subtitle wrapped onto a second line is one problem.
@@ -990,7 +995,10 @@ def _overlap(slide_index, shapes, layout):
             if b is a or _turned(b):
                 continue
             b_ink = ink_box(b)
-            if b_ink is None or _inside(a_text, b_ink):
+            if b_ink is None:
+                continue
+            if (_inside(a_text, b_ink) and b["type"] != msoTable
+                    and not (b.get("z", 0) > a.get("z", 0) and _solid_fill(b))):
                 continue
             width, height = _shared(a_text, b_ink)
             if width <= _MIN_OVERLAP or height <= _MIN_OVERLAP:
@@ -1021,7 +1029,7 @@ def _spill_finding(slide_index, a, a_text, b, b_ink, width, height, layout):
     # words on a card, and the problem is that it does not fit. Saying where
     # it runs past is more use than saying the two collide.
     area = _width(a_text) * _height(a_text)
-    if not (paints_box(b) and b.get("z", 0) < a.get("z", 0)
+    if not (paints_box(b) and b.get("z", 0) < a.get("z", 0) and b["type"] != msoTable
             and area and width * height >= 0.5 * area):
         return None
     room = _room(a_text, b_ink)
@@ -1066,12 +1074,31 @@ def _collision_finding(slide_index, a, a_text, group, shapes, layout):
     # What a shape puts on the slide is its text when it does not paint its box.
     targets = ", ".join(f"'{b['name']}'" if paints_box(b) else f"the text of '{b['name']}'"
                         for b in others)
+    overlap_pt = {"width": round(width, 1), "height": round(height, 1)}
+    # Wholly inside: on a table's cells, or under a card laid in front of it.
+    contained = _inside(a_text, union)
+    on_table = contained and all(b["type"] == msoTable for b in others)
+    in_front = [b for b in others if b.get("z", 0) > a.get("z", 0)]
+    if contained and len(others) == 1 and in_front and not on_table:
+        # Words meant for the card, added before it: the card hides them.
+        b_name = others[0]["name"]
+        return _finding(
+            slide_index, "overlap", [a_name, b_name],
+            f"The text of '{a_name}' is hidden under '{b_name}', which is in front of it.",
+            f"Bring '{a_name}' to the front (ppt_set_shape_zorder shape_name='{a_name}' "
+            f"command='bring_to_front'), so it sits on '{b_name}'.",
+            overlap_pt=overlap_pt,
+        )
     # The cheaper way apart: along whichever axis they share less of.
     vertical = height <= width
-    clear = (height if vertical else width) + _CLEARANCE
     low, high = (1, 3) if vertical else (0, 2)
     sign = 1 if a_text[low] + a_text[high] >= union[low] + union[high] else -1
+    # Far enough to leave the gap past the far side of what it ran into, which
+    # for text lying wholly on a table is all of the table.
+    clear = (union[high] - a_text[low] if sign > 0 else a_text[high] - union[low]) + _CLEARANCE
     field, ways = ("top", ("down", "up")) if vertical else ("left", ("right", "left"))
+    # Shorter words help text that crosses an edge, not text lying on a table.
+    shorten = "" if on_table else f", or shorten the text of '{a_name}'"
     # The smaller of the two moves, a caption rather than the table it
     # captions, unless that would put it on something else: then the other.
     a_box = shape_box(a)
@@ -1080,8 +1107,7 @@ def _collision_finding(slide_index, a, a_text, group, shapes, layout):
             a, a_text, vertical, sign * clear, shapes, others, layout):
         fix = (f"Move '{a_name}' {ways[0] if sign > 0 else ways[1]} by {_pt(clear)} "
                f"(ppt_update_shape d{field}={_num(sign * clear)}), which leaves "
-               f"{_pt(_CLEARANCE)} between it and {targets}, or shorten the text "
-               f"of '{a_name}'.")
+               f"{_pt(_CLEARANCE)} between it and {targets}{shorten}.")
     else:
         boxes = layout["boxes"]
         carried = [s for s in layout["arranged"]
@@ -1093,14 +1119,24 @@ def _collision_finding(slide_index, a, a_text, group, shapes, layout):
         fix = (f"Move {targets} {ways[1] if sign > 0 else ways[0]} by {_pt(clear)}"
                f"{with_them} (ppt_update_shape shape_names={names} "
                f"d{field}={_num(-sign * clear)}), which leaves {_pt(_CLEARANCE)} "
-               f"between {them} and the text of '{a_name}', or shorten the text "
-               f"of '{a_name}'.")
+               f"between {them} and the text of '{a_name}'{shorten}.")
+    if on_table:
+        where = "is hidden under" if in_front else "lies on"
+        message = f"The text of '{a_name}' {where} {targets}, over its cells."
+    else:
+        message = (f"The text of '{a_name}' runs into {targets}: they share an area "
+                   f"{_pt(width)} wide and {_pt(height)} tall.")
     return _finding(
         slide_index, "overlap", [a_name] + [b["name"] for b in others],
-        f"The text of '{a_name}' runs into {targets}: they share an area "
-        f"{_pt(width)} wide and {_pt(height)} tall.",
-        fix, overlap_pt={"width": round(width, 1), "height": round(height, 1)},
+        message, fix, overlap_pt=overlap_pt,
     )
+
+
+def _solid_fill(shape) -> bool:
+    """Whether the shape is filled with one colour that hides what is under it."""
+    fill = shape.get("fill") or {}
+    return (bool(fill.get("visible")) and bool(fill.get("solid"))
+            and (fill.get("transparency") or 0.0) <= _OPAQUE_ENOUGH and not _is_line(shape))
 
 
 def _lands_on_something(a, a_text, vertical, by, shapes, others, layout):
@@ -2290,7 +2326,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
     other: see ``_as_designed``.
     """
     index = slide["slide_index"]
-    shapes = slide["shapes"]
+    shapes = _settled(slide["shapes"])
     template = slide.get("template") or []
     layout = _layout(shapes, slide_w, slide_h)
     findings = (
@@ -2308,9 +2344,19 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _sample_text(index, shapes)
     )
     if only is not None:
+        # Text on a touched card is drawn on its fill, so whether it can still
+        # be read is that write's to report as well: a card filled dark under
+        # dark words.
+        drawn_on = set()
+        for shape in shapes:
+            _, source, painter = _backdrop(shape, shapes, slide.get("background_hex"), template)
+            if source == "shape" and painter["name"] in only:
+                drawn_on.add(shape["name"])
         return _sorted([
             f for f in findings
-            if f["type"] in SHAPE_FINDINGS and any(name in only for name in f["shapes"])
+            if f["type"] in SHAPE_FINDINGS and (
+                any(name in only for name in f["shapes"])
+                or (f["type"] == "low_contrast" and f["shapes"][0] in drawn_on))
         ])
     spacing = _uneven_spacing(index, layout, slide_w)
     # A row whose gaps are reported is put back between the margins by that
@@ -2320,6 +2366,29 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
                 if not (f["type"] == "narrow_margin" and f["shapes"][0] in spaced)]
     findings += spacing + _empty_placeholders(index, shapes)
     return _sorted(findings)
+
+
+def _settled(shapes):
+    """The shapes as PowerPoint leaves them once it has laid out their text.
+
+    A box set to fit its text grows to it, but not always at once: after a
+    change to the fonts of the whole deck, PowerPoint resizes it when it next
+    draws the slide, and a read before that finds the text taller than the
+    box. Such a box is taken at the height it is about to have, from its top
+    down, so it is not reported as overflowing, and what it grows into is.
+    """
+    settled = []
+    for shape in shapes:
+        text = shape.get("text") or {}
+        margins = text.get("margins")
+        needed = text.get("height")
+        if (text.get("autofit") == "shape_to_fit" and margins and needed is not None
+                and text.get("orientation") in (None, "horizontal")):
+            height = round(needed + margins["top"] + margins["bottom"], 2)
+            if height > shape["height"] + _EDGE_TOLERANCE:
+                shape = {**shape, "height": height}
+        settled.append(shape)
+    return settled
 
 
 def _sorted(findings):
@@ -2935,8 +3004,22 @@ def read_shapes(refs, geometry, appearance, detail):
             touched.append(appearance(facts, ref, True))
     for facts, ref in zip(shapes, refs, strict=True):
         if facts["name"] not in detail and within_reach(facts, touched):
-            appearance(facts, ref, False)
+            # The colours of text on a touched card are read too, since they
+            # are drawn on its fill.
+            appearance(facts, ref, _on_touched(facts, touched))
     return shapes
+
+
+def _on_touched(shape, touched) -> bool:
+    """Whether the shape lies on a touched shape that paints, as words on a card."""
+    box = shape_box(shape)
+    for other in touched:
+        if other.get("z", 0) >= shape.get("z", 0) or not paints_box(other):
+            continue
+        width, height = _shared(box, shape_box(other))
+        if width * height >= 0.5 * _width(box) * _height(box):
+            return True
+    return False
 
 
 def _background_hex(slide):

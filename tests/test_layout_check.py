@@ -1346,6 +1346,106 @@ class TestCollisions:
         assert "6 pt between it and 'table'" in finding["fix"]
 
 
+class TestATableThatGrows:
+    # Live: two rows added to a table took it down over its footnote, which
+    # then lay on its cells. The footnote was reported as pressed against the
+    # table's edge and as grey on black, the fill a table reports for itself.
+    def slide(self):
+        table = shape("Table 1", 60, 300, 600, 231, z=1, type=msoTable,
+                      fill={"visible": True, "solid": True, "color_hex": "#000000",
+                            "transparency": 0.0})
+        note = textbox("TextBox 2", 60, 470, 400, 24, z=2, text_width=150, text_height=15,
+                       runs=[{"color_hex": "#595959", "size": 12.0, "bold": False}])
+        return table, note
+
+    def test_text_over_its_cells_runs_into_it(self):
+        found = check(*self.slide())
+        assert [(f["type"], f["shapes"]) for f in found] == [("overlap", ["TextBox 2", "Table 1"])]
+
+    def test_its_write_reports_it(self):
+        found = slide_findings(slide(*self.slide()), W, H, only={"Table 1"})
+        assert [f["type"] for f in found] == ["overlap"]
+
+    def test_the_fix_clears_the_whole_table(self):
+        [found] = check(*self.slide())
+        assert found["message"] == "The text of 'TextBox 2' lies on 'Table 1', over its cells."
+        # Down past the table would take it off the slide, so the table moves
+        # up, far enough to clear the footnote, and nothing says to shorten it.
+        assert found["fix"] == ("Move 'Table 1' up by 63.4 pt (ppt_update_shape shape_names=['Table 1'] "
+                                "dtop=-63.4), which leaves 6 pt between it and the text of 'TextBox 2'.")
+
+
+class TestTextUnderACard:
+    def test_a_card_added_after_its_words_hides_them(self):
+        words = textbox("label", 76, 136, 228, 31, z=1, text_height=22)
+        cover = card("card", 60, 120, 260, 140, z=2, colour="#1F2937")
+        [found] = check(words, cover)
+        assert found["message"] == "The text of 'label' is hidden under 'card', which is in front of it."
+        assert found["fix"].startswith("Bring 'label' to the front (ppt_set_shape_zorder")
+
+    def test_words_on_a_card_are_fine(self):
+        assert check(card("card", 60, 120, 260, 140, z=1),
+                     textbox("label", 76, 136, 228, 31, z=2, text_height=22)) == []
+
+    def test_a_see_through_shape_in_front_hides_nothing(self):
+        words = textbox("label", 76, 136, 228, 31, z=1, text_height=22)
+        frame = shape("frame", 60, 120, 260, 140, z=2, line=True,
+                      fill={"visible": False, "solid": True, "color_hex": "#FFFFFF",
+                            "transparency": 0.0})
+        assert [f for f in check(words, frame) if f["type"] == "overlap"] == []
+
+
+class TestAFillUnderText:
+    def slide(self, colour):
+        words = textbox("label", 76, 136, 228, 31, z=2,
+                        runs=[{"color_hex": "#1F2937", "size": 20.0, "bold": False}])
+        return slide(card("card", 60, 120, 260, 140, z=1, colour=colour), words)
+
+    def test_a_card_filled_dark_under_dark_words_reports_them(self):
+        found = slide_findings(self.slide("#1F2937"), W, H, only={"card"})
+        assert [(f["type"], f["shapes"]) for f in found] == [("low_contrast", ["label"])]
+        assert slide_findings(self.slide("#F1F5F9"), W, H, only={"card"}) == []
+
+    def test_the_words_on_a_touched_card_are_read_in_full(self):
+        shapes = {"card": card("card", 60, 120, 260, 140, z=1),
+                  "label": textbox("label", 76, 136, 228, 31, z=2),
+                  "aside": textbox("aside", 400, 136, 228, 31, z=3)}
+        read = {}
+
+        def geometry(ref, z):
+            return {k: v for k, v in shapes[ref].items() if k not in ("fill", "text")} | {
+                "fill": None, "text": None}
+
+        def appearance(facts, ref, full):
+            read[ref] = full
+            facts.update(fill=shapes[ref]["fill"], text=shapes[ref]["text"])
+            return facts
+
+        layout_check.read_shapes(["card", "label", "aside"], geometry, appearance, ["card"])
+        assert read["card"] is True and read["label"] is True
+        assert read.get("aside") in (None, False)
+
+
+class TestAFontChange:
+    # Live: after ppt_replace_font, a text box set to fit its text was read
+    # before PowerPoint had grown it, and reported as overflowing.
+    def test_a_box_that_fits_its_text_is_taken_at_its_new_height(self):
+        box = textbox("words", 76, 136, 228, 24.3, text_width=200, text_height=48,
+                      autofit="shape_to_fit")
+        assert check(box) == []
+
+    def test_what_it_grows_into_is_reported(self):
+        box = textbox("words", 60, 40, 420, 87.3, text_width=400, text_height=129.6,
+                      autofit="shape_to_fit")
+        below = card("panel", 60, 110, 840, 300, z=2)
+        found = check(box, below)
+        assert [(f["type"], f["shapes"]) for f in found] == [("overlap", ["words", "panel"])]
+
+    def test_a_box_that_does_not_grow_still_overflows(self):
+        box = textbox("words", 76, 136, 228, 24.3, text_width=200, text_height=48)
+        assert kinds(check(box)) == ["overflow"]
+
+
 class TestContrastSuggestions:
     def test_body_text_takes_the_colour_of_body_text(self):
         headings = [textbox(f"h{i}", 60 + 300 * i, 150, 240, 36, z=1 + i,
