@@ -1757,14 +1757,21 @@ import ast  # noqa: E402
 
 REPORTING = {
     "shapes.py": ["add_shape", "add_textbox", "add_picture", "update_shape", "duplicate_shape"],
-    "text.py": ["set_text", "format_text", "format_text_range", "set_textframe"],
-    "advanced_ops.py": ["add_svg_icon"],
-    "layout.py": ["align_shapes", "distribute_shapes", "set_slide_background"],
+    "text.py": ["set_text", "format_text", "format_text_range", "set_textframe",
+                "find_replace_text"],
+    "advanced_ops.py": ["add_svg_icon", "add_picture_from_url", "replace_font",
+                        "set_default_fonts"],
+    "layout.py": ["align_shapes", "distribute_shapes", "set_slide_background", "set_slide_size"],
     "placeholders.py": ["set_placeholder_text"],
-    "tables.py": ["add_table"],
+    "tables.py": ["add_table", "set_table_cell", "set_table_data", "add_table_row",
+                  "add_table_column", "merge_table_cells", "set_table_layout"],
     "charts.py": ["add_chart"],
     "edit_ops.py": ["copy_shape_to_slide"],
+    "formatting.py": ["set_fill"],
+    "batch_apply.py": ["batch_apply_formatting"],
+    "themes.py": ["apply_theme", "set_theme_colors"],
 }
+REPORTERS = {"report_layout", "report_layouts", "report_contrast", "report_deck_change"}
 
 
 class TestWhichWritesReport:
@@ -1776,7 +1783,7 @@ class TestWhichWritesReport:
         [node] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function]
         called = {c.func.id for c in ast.walk(node)
                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
-        assert called & {"report_layout", "report_contrast"}
+        assert called & REPORTERS
 
     def test_a_copy_or_a_placeholder_is_named_by_its_own_key(self):
         assert touched_names({"new_shape_name": "Card copy"}) == ["Card copy"]
@@ -1833,3 +1840,39 @@ class TestTitlesSetRightOrCentred:
         slides.append(set_title(5, 47.2, 200))
         [found] = deck_findings(slides, H, W)
         assert "differ in alignment" in found["message"] and found["slides"] == [5]
+
+
+class TestWritesThatNameShapesOtherwise:
+    def test_a_shape_given_by_position_is_checked_by_its_name(self, monkeypatch):
+        off = card("Rectangle 2", 900, 100, 100, 50, z=2)
+        fake = FakeDeck([slide(card("Rectangle 1", 10, 10, 50, 50), off)])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = report_layout({"success": True}, 1, [2])
+        assert [f["shapes"] for f in result["layout_issues"]] == [["Rectangle 2"]]
+
+    def test_a_write_across_slides_reports_each(self, monkeypatch):
+        first = slide(card("a", 900, 100, 100, 50), index=1)
+        second = slide(card("b", -20, 100, 100, 50), index=2)
+        fake = FakeDeck([first, second])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = layout_check.report_layouts({"mode": "replace"}, {1: ["a"], 2: ["b"]})
+        assert sorted(f["slide_index"] for f in result["layout_issues"]) == [1, 2]
+
+
+class TestAChangeToTheWholeDeck:
+    def test_only_what_the_change_broke_is_reported(self, monkeypatch):
+        already = card("already", 900, 100, 100, 50)                      # off the slide before
+        words = textbox("words", 100, 100, 300, 40,
+                        runs=[{"color_hex": "#222222", "size": 20.0, "bold": False}])
+        fake = FakeDeck([slide(already, words, background="#FFFFFF")])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        before = layout_check.deck_snapshot()
+        # The new theme darkens the background behind the words.
+        fake.slides = [slide(already, words, background="#1A1A1A")]
+        result = layout_check.report_deck_change({"success": True}, before)
+        assert [(f["type"], f["shapes"]) for f in result["layout_issues"]] == [("low_contrast", ["words"])]
+
+    def test_a_deck_that_could_not_be_read_first_blames_nothing(self, monkeypatch):
+        monkeypatch.setattr(layout_check, "ppt", FakePpt(RuntimeError("busy")))
+        assert layout_check.deck_snapshot() is None
+        assert layout_check.report_deck_change({"success": True}, None) == {"success": True}

@@ -34,7 +34,7 @@ from ppt_com.constants import (
 )
 from ppt_com.shapes import SHAPE_NAME_MAP
 from ppt_com.shape_lookup import resolve_shape as _get_shape
-from ppt_com.layout_check import report_layout, touched_names
+from ppt_com.layout_check import deck_snapshot, report_deck_change, report_layout, touched_names
 
 from ppt_com.shapes import ZORDER_FIELD_DESCRIPTION, place_in_zorder
 
@@ -1480,10 +1480,12 @@ def replace_font(params: ReplaceFontInput) -> str:
         JSON confirming the font replacement.
     """
     try:
+        before = deck_snapshot()
         result = ppt.execute(
             _replace_font_impl,
             params.original_font, params.replacement_font,
         )
+        report_deck_change(result, before)
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to replace font: {str(e)}"})
@@ -1513,10 +1515,13 @@ def set_default_fonts(params: SetDefaultFontsInput) -> str:
         JSON with theme update status and number of shapes updated.
     """
     try:
+        # Only a change that reaches the text already on the slides can break them.
+        before = deck_snapshot() if params.apply_to_existing else None
         result = ppt.execute(
             _set_default_fonts_impl,
             params.latin, params.east_asian, params.apply_to_existing,
         )
+        report_deck_change(result, before)
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set default fonts: {str(e)}"})
@@ -1765,6 +1770,7 @@ def add_picture_from_url(params: AddPictureFromUrlInput) -> str:
             params.left, params.top, params.width, params.height,
             params.svg_color, params.fit, params.zorder,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add picture from URL: {str(e)}"})

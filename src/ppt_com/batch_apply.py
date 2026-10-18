@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from utils.offload import run_offloaded
 from backend import ppt
+from ppt_com.layout_check import report_layout
 
 # The input models are imported by name because they are platform neutral. The
 # impl functions are reached through their module instead, and looked up at call
@@ -274,6 +275,7 @@ def batch_apply_formatting(params: BatchApplyFormattingInput) -> str:
             list(params.shapes),
             ops,
         )
+        report_layout(result, params.slide_index, list(params.shapes))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Batch apply failed: {str(e)}"})

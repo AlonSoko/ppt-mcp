@@ -22,7 +22,7 @@ from ppt_com.constants import (
     VIEW_TYPE_NAMES,
 )
 from ppt_com.shape_lookup import require_top_level, resolve_shape as _get_shape
-from ppt_com.layout_check import report_contrast, report_layout
+from ppt_com.layout_check import deck_snapshot, report_contrast, report_deck_change, report_layout
 
 logger = logging.getLogger(__name__)
 
@@ -562,11 +562,13 @@ def set_slide_size(params: SetSlideSizeInput) -> str:
         JSON with the resulting slide dimensions.
     """
     try:
+        before = deck_snapshot()
         result = ppt.execute(
             _set_slide_size_impl,
             params.width, params.height,
             params.preset, params.orientation,
         )
+        report_deck_change(result, before)
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set slide size: {str(e)}"})

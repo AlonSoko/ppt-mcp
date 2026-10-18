@@ -19,7 +19,7 @@ from utils.navigation import goto_slide
 from utils.redraw import FrozenRedraw
 from utils.color import hex_to_int, int_to_hex, int_to_rgb, get_theme_color_index
 from utils.validation import font_size_warning
-from ppt_com.layout_check import report_layout, touched_names
+from ppt_com.layout_check import report_layout, report_layouts, touched_names
 from ppt_com.constants import (
     msoTrue, msoFalse, msoTriStateMixed,
     msoPlaceholder, msoGroup,
@@ -2379,6 +2379,12 @@ def find_replace_text(params: FindReplaceTextInput) -> str:
             params.context_chars,
             params.include_groups,
         )
+        if isinstance(result, dict) and result.get("mode") == "replace":
+            changed = {}
+            for hit in result.get("matches") or []:
+                changed.setdefault(hit.get("slide_index"), set()).add(hit.get("shape_name"))
+            report_layouts(result, {index: sorted(n for n in names if n)
+                                    for index, names in changed.items() if index})
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})

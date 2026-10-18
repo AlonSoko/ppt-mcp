@@ -849,6 +849,8 @@ def set_table_cell(params: SetTableCellInput) -> str:
         warn = font_size_warning(params.font_size)
         if warn:
             result["warning"] = warn
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set table cell: {str(e)}"})
@@ -870,6 +872,8 @@ def set_table_data(params: SetTableDataInput) -> str:
             params.data, params.start_row, params.start_col,
             params.bold_first_row,
         )
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set table data: {str(e)}"})
@@ -891,6 +895,8 @@ def merge_table_cells(params: MergeTableCellsInput) -> str:
             params.start_row, params.start_col,
             params.end_row, params.end_col,
         )
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to merge cells: {str(e)}"})
@@ -911,6 +917,8 @@ def add_table_row(params: TableRowInput) -> str:
             params.slide_index, params.shape_name_or_index,
             params.position, params.height,
         )
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add table row: {str(e)}"})
@@ -951,6 +959,8 @@ def add_table_column(params: TableColumnInput) -> str:
             params.slide_index, params.shape_name_or_index,
             params.position, params.width,
         )
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add table column: {str(e)}"})
@@ -1014,6 +1024,8 @@ def set_table_layout(params: SetTableLayoutInput) -> str:
             params.slide_index, params.shape_name_or_index,
             params.row_heights, params.col_widths,
         )
+        report_layout(result, params.slide_index,
+                      touched_names(result) or [params.shape_name_or_index])
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to set table layout: {str(e)}"})

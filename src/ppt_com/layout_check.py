@@ -2948,29 +2948,112 @@ def check_layout(params: CheckLayoutInput) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _issues_for(slide_index, shapes):
+    """The per-shape findings on one slide for the shapes a write touched.
+
+    ``shapes`` are names, or 1-based positions for a tool that was given one;
+    a position is turned into its name from a read of the slide's geometry.
+    """
+    names = {s for s in shapes if isinstance(s, str) and s}
+    positions = {s for s in shapes if isinstance(s, int) and not isinstance(s, bool)}
+    if positions:
+        facts = ppt.execute(_slide_facts_impl, [slide_index], False, [], None)
+        names |= {s["name"] for s in facts["slides"][0]["shapes"] if s["z"] in positions}
+    if not names:
+        return []
+    facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names), None)
+    return slide_findings(facts["slides"][0], facts["slide_width"], facts["slide_height"],
+                          only=names)
+
+
 def report_layout(result: dict, slide_index: int, shape_names) -> dict:
     """Add what is now wrong with the shapes a write tool just touched.
 
     Called by those tools after their write has landed, with the names out of
-    their own result. Nothing is added when nothing is wrong. When the check
-    itself could not run, the result says that instead, so an absent
-    ``layout_issues`` always means the shapes were checked and are fine.
+    their own result, or the name or position they were given. Nothing is
+    added when nothing is wrong. When the check itself could not run, the
+    result says that instead, so an absent ``layout_issues`` always means the
+    shapes were checked and are fine.
     """
-    names = {name for name in shape_names if name}
-    if not names or not isinstance(result, dict) or "error" in result:
+    return report_layouts(result, {slide_index: shape_names})
+
+
+def report_layouts(result: dict, touched) -> dict:
+    """report_layout for a write that touched shapes on several slides.
+
+    ``touched`` maps each slide index to the shapes touched on it.
+    """
+    touched = {index: [s for s in shapes if s not in (None, "")]
+               for index, shapes in (touched or {}).items()}
+    touched = {index: shapes for index, shapes in touched.items() if shapes}
+    if not touched or not isinstance(result, dict) or "error" in result:
         return result
+    issues = []
     try:
-        facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names), None)
-        slide = facts["slides"][0]
-        issues = slide_findings(
-            slide, facts["slide_width"], facts["slide_height"], only=names,
-        )
+        for slide_index in sorted(touched):
+            issues += _issues_for(slide_index, touched[slide_index])
     except Exception as e:  # noqa: BLE001 - the write itself already succeeded
         logger.debug("Layout check after a write failed", exc_info=True)
         result["layout_check_failed"] = str(e)
         return result
     if issues:
         result["layout_issues"] = issues
+    return result
+
+
+def _deck_findings_now():
+    """Every finding on every slide, and across the deck, read a slide per call."""
+    from ppt_com.text import _slide_count_impl
+
+    count = ppt.execute(_slide_count_impl)
+    cache, slides, facts = {}, [], None
+    for index in range(1, count + 1):
+        facts = ppt.execute(_slide_facts_impl, [index], False, None, cache)
+        slides += facts["slides"]
+    if facts is None:
+        return []
+    found = []
+    for slide in slides:
+        found += slide_findings(slide, facts["slide_width"], facts["slide_height"])
+    return found + deck_findings(slides, facts["slide_height"], facts["slide_width"])
+
+
+def _issue_key(finding):
+    return finding.get("slide_index"), finding["type"], tuple(finding["shapes"])
+
+
+def deck_snapshot():
+    """What is wrong with the deck before a change to the whole of it.
+
+    None when it cannot be read, and then the change reports nothing rather
+    than blaming itself for problems that were already there.
+    """
+    try:
+        return {_issue_key(f) for f in _deck_findings_now()}
+    except Exception:  # noqa: BLE001 - the change itself still goes ahead
+        logger.debug("Reading the deck before a deck-wide change failed", exc_info=True)
+        return None
+
+
+def report_deck_change(result: dict, before) -> dict:
+    """Add what a change to the whole deck left wrong that was not wrong before.
+
+    A new theme, theme colours, fonts or slide size can change every slide at
+    once: text grows past its box, a colour stops reading on its card, a shape
+    lands off a smaller slide. What was already wrong is not this call's doing,
+    so only what is new is reported.
+    """
+    if not isinstance(result, dict) or "error" in result or before is None:
+        return result
+    try:
+        after = _deck_findings_now()
+    except Exception as e:  # noqa: BLE001 - the change itself already succeeded
+        logger.debug("Layout check after a deck-wide change failed", exc_info=True)
+        result["layout_check_failed"] = str(e)
+        return result
+    new = [f for f in after if _issue_key(f) not in before]
+    if new:
+        result["layout_issues"] = new
     return result
 
 
