@@ -1235,11 +1235,12 @@ def _template_collisions(slide_index, shapes, template, layout, area=()):
             hits.append((graphic, ink, width, height))
         if hits:
             findings.append(_template_collision_finding(slide_index, a, a_ink, hits, shapes,
-                                                        obstacles, layout))
+                                                        obstacles, layout, bool(area)))
     return findings
 
 
-def _template_collision_finding(slide_index, a, a_ink, hits, shapes, graphics, layout):
+def _template_collision_finding(slide_index, a, a_ink, hits, shapes, graphics, layout,
+                                carved=False):
     a_name = a["name"]
     width = max(w for _, _, w, _ in hits)
     height = max(h for _, _, _, h in hits)
@@ -1252,6 +1253,13 @@ def _template_collision_finding(slide_index, a, a_ink, hits, shapes, graphics, l
     what = f"'{a_name}'" if paints_box(a) else f"The text of '{a_name}'"
     if all(_inside(ink, a_ink) for _, ink, _, _ in hits):
         message = f"{what} covers {named}{drawn}."
+    elif carved and all(_sparse(g) for g, _, _, _ in hits):
+        # Lines in a corner leave most of their box empty, so the shape may
+        # touch none of them; what it did is leave the template's content area.
+        kind = "a decoration" if len(hits) == 1 else "decorations"
+        by = f"drawn by {source}" if source else "of the template"
+        message = (f"{what} runs out of the template's content area into the space of "
+                   f"{named}, {kind} {by}: an area {_pt(width)} wide and {_pt(height)} tall.")
     else:
         message = (f"{what} runs into {named}{drawn}: they share an area "
                    f"{_pt(width)} wide and {_pt(height)} tall.")
@@ -1570,7 +1578,8 @@ def _as_designed(shape, source, follows_background) -> bool:
     So text in theme colours, on a placeholder, over what the template paints,
     is taken as meant. Text the caller coloured, text on a shape the caller
     added, and text on a background the caller changed are the caller's, and
-    are checked.
+    are checked. So is every placeholder when the caller changes the theme's
+    colours, which ``trust_template`` turns this off for.
     """
     if shape.get("placeholder_type") is None:
         return False
@@ -1584,7 +1593,7 @@ def _as_designed(shape, source, follows_background) -> bool:
 
 
 def _low_contrast(slide_index, shapes, background_hex, template=(), follows_background=None,
-                  layout=None):
+                  layout=None, trust_template=True):
     from ppt_com.themes import _contrast_ratio
 
     findings = []
@@ -1593,7 +1602,7 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         if not shape.get("visible", True) or not text or not text.get("chars"):
             continue
         backdrop, painted_by, painter = _backdrop(shape, shapes, background_hex, template)
-        if not backdrop or _as_designed(shape, painted_by, follows_background):
+        if not backdrop or (trust_template and _as_designed(shape, painted_by, follows_background)):
             continue
         worst = None
         for run in text.get("runs") or []:
@@ -1624,7 +1633,13 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
                     f"color='{suggestion}'")
         on = ""
         fix = f"{recolour[0].upper()}{recolour[1:]}. Or change what is behind it."
-        if painted_by == "template" and painter is not None:
+        runs = text.get("runs") or []
+        if not trust_template and runs and all(run.get("theme") for run in runs):
+            # The theme's colours were just changed, and this text takes its
+            # colour from the theme: putting the theme right fixes every slide.
+            fix = (f"Its colour is the theme's: choose theme colours that read on each other "
+                   f"(ppt_set_theme_colors), or {recolour}.")
+        elif painted_by == "template" and painter is not None:
             # Text the caller put on a band or panel of the template's: the
             # template keeps that place for itself, so off it is the better fix.
             on = f" It sits on '{painter['name']}', part of the template."
@@ -2265,12 +2280,14 @@ def _empty_placeholders(slide_index, shapes):
     return findings
 
 
-def slide_findings(slide, slide_w, slide_h, only=None):
+def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
     """Every finding for one slide, worst first.
 
     ``slide`` is one entry of what ``_slide_facts_impl`` returns. With
     ``only``, a set of shape names, the answer is the per shape findings that
-    involve one of those shapes, which is what a write tool reports.
+    involve one of those shapes, which is what a write tool reports. Without
+    ``trust_template``, placeholder text in theme colours is judged like any
+    other: see ``_as_designed``.
     """
     index = slide["slide_index"]
     shapes = slide["shapes"]
@@ -2282,7 +2299,7 @@ def slide_findings(slide, slide_w, slide_h, only=None):
         + _overlap(index, shapes, layout)
         + _template_collisions(index, shapes, template, layout, slide.get("template_area"))
         + _low_contrast(index, shapes, slide.get("background_hex"), template,
-                        slide.get("follows_background"), layout)
+                        slide.get("follows_background"), layout, trust_template)
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
@@ -2439,11 +2456,13 @@ def deck_findings(slides, slide_h, slide_w=None):
     # a statement layout's larger. When most titles are the template's, the
     # template is what the deck follows, and a title it styled differs from
     # those on other layouts by design; it is held only to titles on its own
-    # layout. A title the caller drew or recoloured is held to all of them.
-    # When most titles are the caller's own, the deck follows those, and every
-    # title is held to them.
+    # layout. A deck on two designs has a "Title and Content" in each, and
+    # each styles its title its own way, so a layout is told by its design as
+    # well as its name. A title the caller drew or recoloured is held to all
+    # of them. When most titles are the caller's own, the deck follows those,
+    # and every title is held to them.
     styled = {i: _template_title(t) for i, t in titled}
-    layout_of = {i: by_index[i].get("layout") for i, _ in titled}
+    layout_of = {i: (by_index[i].get("design"), by_index[i].get("layout")) for i, _ in titled}
 
     def held(i, usual):
         if not styled[i]:
@@ -3073,6 +3092,10 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             layout = slide.CustomLayout.Name
         except Exception:
             layout = None
+        try:
+            design = slide.Design.Name
+        except Exception:
+            design = None
         refs = [slide.Shapes(z) for z in range(1, slide.Shapes.Count + 1)]
         shapes = read_shapes(refs, _geometry_facts, _read_appearance, detail)
         touched = None if detail is None else [s for s in shapes if s["name"] in detail]
@@ -3083,6 +3106,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         template = _template_facts(slide, touched, template_cache)
         facts["slides"].append({
             "slide_index": slide_index,
+            "design": design,
             "layout": layout,
             "background_hex": (
                 _background_hex(slide) if needs_background(shapes, detail) else None
@@ -3184,7 +3208,7 @@ def report_layouts(result: dict, touched) -> dict:
     return result
 
 
-def _deck_findings_now():
+def _deck_findings_now(trust_template=True):
     """Every finding on every slide, and across the deck, read a slide per call."""
     from ppt_com.text import _slide_count_impl
 
@@ -3197,7 +3221,8 @@ def _deck_findings_now():
         return []
     found = []
     for slide in slides:
-        found += slide_findings(slide, facts["slide_width"], facts["slide_height"])
+        found += slide_findings(slide, facts["slide_width"], facts["slide_height"],
+                                trust_template=trust_template)
     return found + deck_findings(slides, facts["slide_height"], facts["slide_width"])
 
 
@@ -3205,20 +3230,22 @@ def _issue_key(finding):
     return finding.get("slide_index"), finding["type"], tuple(finding["shapes"])
 
 
-def deck_snapshot():
+def deck_snapshot(trust_template=True):
     """What is wrong with the deck before a change to the whole of it.
 
     None when it cannot be read, and then the change reports nothing rather
-    than blaming itself for problems that were already there.
+    than blaming itself for problems that were already there. A change to the
+    theme's colours is the caller's choice, not the template's, so it is read
+    without ``trust_template``; see ``_as_designed``.
     """
     try:
-        return {_issue_key(f) for f in _deck_findings_now()}
+        return {_issue_key(f) for f in _deck_findings_now(trust_template)}
     except Exception:  # noqa: BLE001 - the change itself still goes ahead
         logger.debug("Reading the deck before a deck-wide change failed", exc_info=True)
         return None
 
 
-def report_deck_change(result: dict, before) -> dict:
+def report_deck_change(result: dict, before, trust_template=True) -> dict:
     """Add what a change to the whole deck left wrong that was not wrong before.
 
     A new theme, theme colours, fonts or slide size can change every slide at
@@ -3229,7 +3256,7 @@ def report_deck_change(result: dict, before) -> dict:
     if not isinstance(result, dict) or "error" in result or before is None:
         return result
     try:
-        after = _deck_findings_now()
+        after = _deck_findings_now(trust_template)
     except Exception as e:  # noqa: BLE001 - the change itself already succeeded
         logger.debug("Layout check after a deck-wide change failed", exc_info=True)
         result["layout_check_failed"] = str(e)
@@ -3332,9 +3359,10 @@ def register_tools(mcp):
         The tools that add, copy, move, resize or retext a shape, or fill a
         placeholder, run the per shape checks on that shape themselves and
         report what they find in ``layout_issues``; a new slide background
-        reports the text it left hard to read. No ``layout_issues`` means it
-        was checked and is fine; ``layout_check_failed`` means the check could
-        not run.
+        reports the text it left hard to read, and a new theme, theme colours,
+        fonts or slide size what they broke across the deck. No
+        ``layout_issues`` means it was checked and is fine;
+        ``layout_check_failed`` means the check could not run.
         """
         return await run_offloaded(check_layout, params)
 

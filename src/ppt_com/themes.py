@@ -566,9 +566,11 @@ def set_theme_colors(params: SetThemeColorsInput) -> str:
         for name, hex_val in merged.items():
             color_map[THEME_COLOR_MAP[name]] = hex_to_int(hex_val)
 
-        before = deck_snapshot()
+        # The colours are the caller's now, not the template's: placeholder
+        # text in them is judged like any other.
+        before = deck_snapshot(trust_template=False)
         result = ppt.execute(_set_theme_colors_impl, color_map)
-        report_deck_change(result, before)
+        report_deck_change(result, before, trust_template=False)
         if preset_name:
             result["preset"] = preset_name
         if params.primary is not None:

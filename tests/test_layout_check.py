@@ -1174,6 +1174,65 @@ class TestARightToLeftDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+class TestADeckOnTwoDesigns:
+    # Office Theme on slides 1-3 and Retrospect on 4-5, on Windows. Each design
+    # has a "Title Only" layout of its own, and each styles its title its own
+    # way: 44 pt black at 73 pt in, and 48 pt grey at 94 pt in, lower.
+    SEEN = {
+        1: [], 2: [], 3: [], 4: [],
+        5: [("low_contrast", "TextBox 3")],             # a grey note on Retrospect's band
+    }
+
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("mmdeck_broken_win")) == self.SEEN
+
+    def test_each_designs_titles_are_held_only_to_their_own(self):
+        deck = recorded("mmdeck_broken_win")
+        assert {s["design"] for s in deck["slides"]} == {"Office Theme", "Retrospect"}
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+    def test_the_fixed_deck_is_clean(self):
+        fixed = recorded("mmdeck_fixed_win")
+        assert all(found == [] for found in findings_by_slide(fixed).values())
+
+
+class TestThemesDrawnInLinesOnWindows:
+    # Slice, a fan of thin lines in the bottom right corner, and Wisp, curves
+    # down the left: both on the master, as groups whose boxes are mostly
+    # empty, and both themes start their title and body clear of them.
+    SLICE = {
+        1: [], 2: [],
+        3: [("overlap", "Rounded Rectangle 6")],        # a row of cards past the content area
+        4: [("overlap", "TextBox 4"),                   # a source note under the lines' tips
+            ("misaligned", "TextBox 3")],               # a note 1.2 pt off the text beside it
+        5: [],
+    }
+    WISP = {
+        1: [], 2: [], 3: [],
+        4: [("overlap", "TextBox 2")],                  # text set over the curves
+        5: [],
+    }
+
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("slicedeck_broken_win")) == self.SLICE
+        assert findings_by_slide(recorded("wispdeck_broken_win")) == self.WISP
+
+    def test_text_over_the_curves_moves_in_line_with_the_title(self):
+        fixes = fixes_of(recorded("wispdeck_broken_win"))
+        assert fixes[(4, "overlap")].startswith("Move 'TextBox 2' right by 164.2 pt, in line with 'Title 1'")
+
+    def test_the_row_narrows_evenly_to_keep_inside_the_content_area(self):
+        fixes = fixes_of(recorded("slicedeck_broken_win"))
+        assert fixes[(3, "overlap")].startswith("Make the row fit before 'Group 6'")
+        assert fixes[(3, "overlap")].endswith("The gaps stay 20 pt.")
+
+    def test_the_fixed_decks_are_clean(self):
+        for name in ("slicedeck_fixed_win", "wispdeck_fixed_win"):
+            fixed = recorded(name)
+            assert all(found == [] for found in findings_by_slide(fixed).values()), name
+            assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+
+
 # ---------------------------------------------------------------------------
 # What text keeps to
 # ---------------------------------------------------------------------------
@@ -1633,6 +1692,25 @@ class TestATemplatesTitles:
         [found] = deck_findings(slides, H, W)
         assert found["slides"] == [5] and "size" in found["message"]
 
+    def test_a_layout_of_the_same_name_on_another_design_styles_its_own_title(self):
+        # Office Theme and Retrospect in one deck: each has a "Title and
+        # Content", with a title of its own size, place and colour.
+        slides = []
+        for i in (1, 2, 3):
+            page = themed_title_slide(i, "Title and Content", size=44.0, left=73.2,
+                                      colour="#000000")
+            page["design"] = "Office Theme"
+            slides.append(page)
+        for i in (4, 5):
+            page = themed_title_slide(i, "Title and Content", size=48.0, left=93.6,
+                                      colour="#404040")
+            page["design"] = "Retrospect"
+            slides.append(page)
+        assert deck_findings(slides, H, W) == []
+        for page in slides:
+            page["design"] = None
+        assert deck_findings(slides, H, W) != []
+
     def test_a_title_low_in_a_tall_frame_is_anchored_not_moved_off_the_slide(self):
         def boxed(index, frame_top, text_top):
             title = placed(f"Title {index}", 98.56, frame_top, 801.44, 117.6, 105.8, text_top, 300, 38)
@@ -1877,6 +1955,36 @@ class TestAChangeToTheWholeDeck:
         assert layout_check.deck_snapshot() is None
         assert layout_check.report_deck_change({"success": True}, None) == {"success": True}
 
+    def test_titles_in_theme_colours_the_caller_changed_are_judged(self, monkeypatch):
+        # A dark background in light1 and the titles left in a dark dark1: the
+        # placeholders still take the theme's colours, which are no longer
+        # the template's design but the caller's.
+        def deck(text, background):
+            title = title_placeholder(colour=text)
+            title["text"]["chars"] = 12
+            return [templated(title, index=i, background=background) for i in (1, 2)]
+        fake = FakeDeck(deck("#0B2545", "#FFFFFF"))
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        before = layout_check.deck_snapshot(trust_template=False)
+        fake.slides = deck("#0B2545", "#111827")
+        result = layout_check.report_deck_change({"success": True}, before, trust_template=False)
+        found = result["layout_issues"]
+        assert [(f["slide_index"], f["type"]) for f in found] == [(1, "low_contrast"), (2, "low_contrast")]
+        assert found[0]["fix"].startswith("Its colour is the theme's: choose theme colours that "
+                                          "read on each other (ppt_set_theme_colors), or make the text")
+        # A new theme, colours and graphics chosen together, is still trusted.
+        fake.slides = deck("#0B2545", "#FFFFFF")
+        before = layout_check.deck_snapshot()
+        fake.slides = deck("#0B2545", "#111827")
+        assert "layout_issues" not in layout_check.report_deck_change({"success": True}, before)
+
+    def test_setting_theme_colours_judges_the_placeholders(self):
+        source = (Path(__file__).parent.parent / "src" / "ppt_com" / "themes.py").read_text()
+        body = source[source.index("def set_theme_colors("):]
+        body = body[:body.index("\ndef ")]
+        assert "deck_snapshot(trust_template=False)" in body
+        assert "report_deck_change(result, before, trust_template=False)" in body
+
 
 class TestATitleTooLongForItsBox:
     def test_growing_it_into_the_body_is_not_the_fix(self):
@@ -1930,6 +2038,16 @@ class TestDecorationsDrawnInLines:
         page["template_area"] = [[54, 353, 726, 472], [54, 54, 726, 339]]
         [found] = overlaps(slide_findings(page, W, H))
         assert found["shapes"] == ["c2", "Group 6"]
+        # Its lines may be nowhere near the card: what it did is leave the area.
+        assert found["message"].startswith(
+            "'c2' runs out of the template's content area into the space of 'Group 6', "
+            "a decoration drawn by the slide master: an area")
+
+    def test_without_the_themes_area_a_decoration_is_its_box(self):
+        lines = graphic("Group 6", 725, 233, 235, 253, type=layout_check.msoGroup, fill=None)
+        cards = [card(f"c{i}", 54 + 246 * i, 60, 226, 250, z=2 + i) for i in range(3)]
+        [found] = overlaps(check_on([lines], *cards))
+        assert found["message"].startswith("'c2' runs into 'Group 6', part of the template")
 
 
 class TestARowIntoADecoration:
