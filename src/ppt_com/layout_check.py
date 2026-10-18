@@ -136,6 +136,15 @@ _TITLE_SIZE_TOLERANCE = 1.0
 _TITLE_ZONE = 0.25
 _MIN_TITLE_SIZE = 24.0
 
+# A title placeholder starting this share of the slide's width away from where
+# the other titles start was put there by its layout, a caption layout's side
+# column, and is styled for that place.
+_TITLE_ELSEWHERE = 0.25
+
+# A row of like shapes can have one a little wider than the rest by accident.
+# Wider than this, and it is a design: a wide card beside two narrow ones.
+_ALONG_SIZE_SLIP = 0.25
+
 # How much of a shape's text the reader keeps, for the checks that read it.
 _CONTENT_KEPT = 500
 
@@ -1068,13 +1077,272 @@ def _lands_on_something(a, a_text, vertical, by, shapes, others, layout):
     return False
 
 
-def _backdrop_colour(shape, shapes, background_hex):
-    """The colour the shape's text is drawn on, or None when it cannot be told.
+_FROM = {"master": "the slide master", "layout": "the slide's layout"}
+
+
+def _template_collisions(slide_index, shapes, template, layout):
+    """The slide's own shapes running into the template's graphics.
+
+    A logo, a band down one side, a footer line: the template draws them on
+    every slide, and nothing a slide adds is meant to cross them. Text over
+    one is hard to read, and a card over one cuts into the design.
+
+    Placeholders are where their layout put them and are left alone. So is a
+    shape wholly on a graphic, which is the contrast check's to judge. One
+    covering a graphic whole is reported: a chart sized over the logo and the
+    confidentiality line hides them as surely as one crossing their edge. A
+    backdrop over the whole slide is a decision about the whole slide, and is
+    not a shape here at all.
+    """
+    slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
+    graphics = []
+    for graphic in template or ():
+        if not graphic.get("visible", True) or _is_line(graphic) or _turned(graphic):
+            continue
+        if _is_backdrop(graphic, slide_w, slide_h):
+            continue
+        ink = ink_box(graphic)
+        if ink is not None:
+            graphics.append((graphic, ink))
+    if not graphics:
+        return []
+    findings = []
+    for a in shapes:
+        if (not a.get("visible", True) or _is_line(a) or _turned(a)
+                or a.get("placeholder_type") is not None):
+            continue
+        a_ink = shape_box(a) if paints_box(a) else text_box(a)
+        if a_ink is None:
+            continue
+        hits = []
+        for graphic, ink in graphics:
+            width, height = _shared(a_ink, ink)
+            if width <= _MIN_OVERLAP or height <= _MIN_OVERLAP:
+                continue
+            if _inside(a_ink, ink):
+                continue
+            hits.append((graphic, ink, width, height))
+        if hits:
+            findings.append(_template_collision_finding(slide_index, a, a_ink, hits, shapes,
+                                                        graphics, layout))
+    return findings
+
+
+def _template_collision_finding(slide_index, a, a_ink, hits, shapes, graphics, layout):
+    a_name = a["name"]
+    width = max(w for _, _, w, _ in hits)
+    height = max(h for _, _, _, h in hits)
+    union = (min(i[0] for _, i, _, _ in hits), min(i[1] for _, i, _, _ in hits),
+             max(i[2] for _, i, _, _ in hits), max(i[3] for _, i, _, _ in hits))
+    named = " and ".join(f"'{g['name']}'" for g, _, _, _ in hits)
+    sources = {g.get("source") for g, _, _, _ in hits}
+    source = _FROM.get(sources.pop()) if len(sources) == 1 else None
+    drawn = f", part of the template drawn by {source}" if source else ", part of the template"
+    what = f"'{a_name}'" if paints_box(a) else f"The text of '{a_name}'"
+    if all(_inside(ink, a_ink) for _, ink, _, _ in hits):
+        message = f"{what} covers {named}{drawn}."
+    else:
+        message = (f"{what} runs into {named}{drawn}: they share an area "
+                   f"{_pt(width)} wide and {_pt(height)} tall.")
+    # A chart trimmed a little at the bottom stays where it was, under its
+    # title; moved, it would jam against the title. A small shape is better
+    # moved than squeezed.
+    fix = (_template_resize(a, union, named, layout)
+           or _template_shrink(a, union, named, keep=0.8)
+           or _template_move(a, a_ink, union, named, shapes, graphics, layout)
+           or _template_shrink(a, union, named, keep=0.5)
+           or (f"Move '{a_name}' clear of {named}, or make it smaller: the template keeps "
+               "that part of the slide for its own graphics."))
+    return _finding(
+        slide_index, "overlap", [a_name] + [g["name"] for g, _, _, _ in hits],
+        message, fix, overlap_pt={"width": round(width, 1), "height": round(height, 1)},
+        template_graphics=[g["name"] for g, _, _, _ in hits],
+    )
+
+
+def _template_resize(a, union, named, layout):
+    """Pull back the side of a card in a row that crosses a template graphic.
+
+    Moving a card out of a row of like ones breaks the row's spacing; taking
+    back the edge that crossed keeps the rest of it where it was. The size the
+    rest of the row shares is the one to take when it is enough.
+    """
+    name = a["name"]
+    boxes = layout["boxes"]
+    if name not in boxes or not paints_box(a):
+        return None
+    for groups, low, field, word, kind in ((layout["rows"], 0, "width", "wide", "row"),
+                                           (layout["columns"], 1, "height", "tall", "column")):
+        mates = groups.get(name)
+        if not mates or len(mates) < 2:
+            continue
+        box = boxes[name]
+        high = low + 2
+        size = box[high] - box[low]
+        others = [boxes[m][high] - boxes[m][low] for m in mates if m != name and m in boxes]
+        usual = _clusters(list(enumerate(others)), _SIZE_TOLERANCE)
+        shared = sorted(v for _, v in usual[0])[len(usual[0]) // 2] if usual else None
+        position = "left" if low == 0 else "top"
+        if union[low] >= (box[low] + box[high]) / 2:
+            # The graphic is past its far edge: the near edge stays.
+            room = union[low] - _CLEARANCE - box[low]
+            if room <= 0:
+                continue
+            target = shared if shared is not None and shared <= room else room
+            if target < 0.5 * size:
+                continue
+            like = f" like the rest of its {kind}" if target == shared else ""
+            return (f"Make '{name}' {_pt(target)} {word}{like} (ppt_update_shape "
+                    f"{field}={_num(target)}), which leaves it {_pt(union[low] - box[low] - target)} "
+                    f"clear of {named}.")
+        if union[high] <= (box[low] + box[high]) / 2:
+            start = union[high] + _CLEARANCE
+            room = box[high] - start
+            if room <= 0:
+                continue
+            target = shared if shared is not None and shared <= room else room
+            if target < 0.5 * size:
+                continue
+            like = f" like the rest of its {kind}" if target == shared else ""
+            new_start = box[high] - target
+            return (f"Make '{name}' {_pt(target)} {word}{like}, keeping its far edge "
+                    f"(ppt_update_shape {position}={_num(new_start)} {field}={_num(target)}), "
+                    f"which leaves it {_pt(new_start - union[high])} clear of {named}.")
+    return None
+
+
+def _template_shrink(a, union, named, keep):
+    """Take back the side of a shape that crosses a template graphic.
+
+    Only for a shape that paints, since a text frame made smaller keeps its
+    text by wrapping it, and only when at least ``keep`` of it is left.
+    """
+    if not paints_box(a):
+        return None
+    box = shape_box(a)
+    options = []
+    for low, field, word, position in ((1, "height", "tall", "top"), (0, "width", "wide", "left")):
+        high = low + 2
+        size = box[high] - box[low]
+        if size <= 0:
+            continue
+        if union[low] >= (box[low] + box[high]) / 2:
+            target = union[low] - _CLEARANCE - box[low]
+            if target >= keep * size:
+                options.append((size - target, (
+                    f"Make '{a['name']}' {_pt(target)} {word} (ppt_update_shape "
+                    f"{field}={_num(target)}), which leaves it {_pt(_CLEARANCE)} clear of {named}.")))
+        elif union[high] <= (box[low] + box[high]) / 2:
+            start = union[high] + _CLEARANCE
+            target = box[high] - start
+            if target >= keep * size:
+                options.append((size - target, (
+                    f"Make '{a['name']}' {_pt(target)} {word}, keeping its far edge "
+                    f"(ppt_update_shape {position}={_num(start)} {field}={_num(target)}), "
+                    f"which leaves it {_pt(_CLEARANCE)} clear of {named}.")))
+    return min(options)[1] if options else None
+
+
+def _template_move(a, a_ink, union, named, shapes, graphics, layout):
+    """The shortest move that takes a shape clear of a template graphic.
+
+    Whichever way is shortest and leaves it on the slide, away from the other
+    shapes and the template's other graphics. The text on a card moves with it.
+    Moved sideways, it goes on to the nearest edge something on the slide
+    already keeps, the title's or the chart's, when that is not much further:
+    clear of the graphic and in line with the content reads as placed.
+    """
+    slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
+    boxes = layout["boxes"]
+    carried, holders = [], set()
+    if a["name"] in boxes:
+        for s in layout["arranged"]:
+            if s is a or s["name"] not in boxes:
+                continue
+            if paints_box(a) and _belongs_to(s, a, boxes):
+                carried.append(s)
+            elif _belongs_to(a, s, boxes):
+                holders.add(s["name"])
+    skip = {a["name"]} | {s["name"] for s in carried} | holders
+
+    def lands_clear(field, by):
+        dx, dy = (by, 0.0) if field == "left" else (0.0, by)
+        moved = (a_ink[0] + dx, a_ink[1] + dy, a_ink[2] + dx, a_ink[3] + dy)
+        if slide_w and slide_h and (
+                moved[0] < -_EDGE_TOLERANCE or moved[1] < -_EDGE_TOLERANCE
+                or moved[2] > slide_w + _EDGE_TOLERANCE or moved[3] > slide_h + _EDGE_TOLERANCE):
+            return False
+        near = _CLEARANCE / 2
+        reach = (moved[0] - near, moved[1] - near, moved[2] + near, moved[3] + near)
+        inks = [ink for _, ink in graphics]
+        for other in shapes:
+            if other["name"] in skip or not other.get("visible", True) or _is_line(other):
+                continue
+            if slide_w and slide_h and _is_backdrop(other, slide_w, slide_h):
+                continue
+            inks.append(ink_box(other))
+        for ink in inks:
+            if ink is None:
+                continue
+            w, h = _shared(reach, ink)
+            if w > _MIN_OVERLAP and h > _MIN_OVERLAP:
+                return False
+        return True
+
+    shortest = sorted((abs(by), field, by, words) for field, by, words in (
+        ("left", union[2] + _CLEARANCE - a_ink[0], "right"),
+        ("left", union[0] - _CLEARANCE - a_ink[2], "left"),
+        ("top", union[3] + _CLEARANCE - a_ink[1], "down"),
+        ("top", union[1] - _CLEARANCE - a_ink[3], "up"),
+    ))
+    chosen = next(((field, by, words) for _, field, by, words in shortest
+                   if lands_clear(field, by)), None)
+    if chosen is None:
+        return None
+    field, by, words = chosen
+    where = ""
+    if field == "left":
+        lines = [(s["left"], s["left"] + s["width"], f"in line with '{s['name']}'")
+                 for s in layout["arranged"] if s["name"] not in skip]
+        margin = (layout.get("margins") or {}).get("horizontal")
+        if margin is not None and slide_w:
+            lines.append((margin, slide_w - margin, "on the slide's margin"))
+        right_edge = a["left"] + a["width"]
+        if by > 0:
+            options = sorted((left - a["left"], f", {label}") for left, _, label in lines
+                             if left - a["left"] >= by - _EDGE_TOLERANCE)
+        else:
+            options = sorted((right - right_edge, f", {label}") for _, right, label in lines
+                             if right - right_edge <= by + _EDGE_TOLERANCE)[::-1]
+        for aligned, label in options:
+            if abs(aligned - by) > max(40.0, abs(by)):
+                break
+            if lands_clear(field, aligned):
+                by, where = aligned, label
+                break
+    if carried:
+        names = [a["name"]] + [s["name"] for s in carried]
+        call = f"ppt_update_shape shape_names={names} d{field}={_num(by)}"
+        along = " together with what is on it"
+    else:
+        call = f"ppt_update_shape d{field}={_num(by)}"
+        along = ""
+    if where:
+        return (f"Move '{a['name']}' {words} by {_pt(abs(by))}{where}{along} ({call}), "
+                f"clear of {named}.")
+    return (f"Move '{a['name']}' {words} by {_pt(abs(by))}{along} ({call}), which "
+            f"leaves {_pt(_CLEARANCE)} between it and {named}.")
+
+
+def _backdrop(shape, shapes, background_hex, template=()):
+    """The colour the shape's text is drawn on, and what paints it.
 
     The shape's own fill when it has a solid one, otherwise the nearest shape
-    underneath that holds the whole of the text and paints something, and
-    otherwise the slide's background. A picture, a gradient or a see-through
-    fill in the way means the colour is not one colour, so there is no answer.
+    underneath that holds the whole of the text and paints something, then a
+    graphic of the template's that does, and otherwise the slide's background.
+    What paints it is "fill", "shape", "template" or "background". A picture,
+    a gradient or a see-through fill in the way means the colour is not one
+    colour, so the colour is None.
     """
     def solid(fill):
         if not fill or not fill.get("visible"):
@@ -1085,25 +1353,56 @@ def _backdrop_colour(shape, shapes, background_hex):
 
     painted, colour = solid(shape.get("fill"))
     if painted:
-        return colour
+        return colour, "fill"
     words = text_box(shape)
     if words is None:
-        return None
+        return None, None
     below = [s for s in shapes if s.get("z", 0) < shape.get("z", 0)]
-    for other in sorted(below, key=lambda s: s.get("z", 0), reverse=True):
-        if not other.get("visible", True) or _is_line(other):
-            continue
-        if not _inside(words, shape_box(other)):
-            continue
-        if other["type"] in _UNKNOWN_BACKDROP_TYPES:
-            return None
-        painted, colour = solid(other.get("fill"))
-        if painted:
-            return colour
-    return background_hex
+    for source, candidates in (("shape", below), ("template", list(template or ()))):
+        for other in sorted(candidates, key=lambda s: s.get("z", 0), reverse=True):
+            if not other.get("visible", True) or _is_line(other):
+                continue
+            if not _inside(words, shape_box(other)):
+                continue
+            if other["type"] in _UNKNOWN_BACKDROP_TYPES:
+                return None, source
+            painted, colour = solid(other.get("fill"))
+            if painted:
+                return colour, source
+    return background_hex, "background"
 
 
-def _low_contrast(slide_index, shapes, background_hex):
+def _backdrop_colour(shape, shapes, background_hex, template=()):
+    """The colour the shape's text is drawn on, or None when it cannot be told."""
+    return _backdrop(shape, shapes, background_hex, template)[0]
+
+
+def _as_designed(shape, source, follows_background) -> bool:
+    """Whether a placeholder's text is still the template's own design.
+
+    A placeholder keeps the colours its layout gave it, and the layout chose
+    them for what it draws behind it: a section layout's dark panel, a caption
+    column. PowerPoint for Mac cannot read a layout's own graphics, so that
+    panel may not be in what was read, and judging the text against the slide's
+    background then reports a light title on a dark panel as unreadable.
+
+    So text in theme colours, on a placeholder, over what the template paints,
+    is taken as meant. Text the caller coloured, text on a shape the caller
+    added, and text on a background the caller changed are the caller's, and
+    are checked.
+    """
+    if shape.get("placeholder_type") is None:
+        return False
+    if source == "background":
+        if follows_background is False:
+            return False
+    elif source != "template":
+        return False
+    runs = (shape.get("text") or {}).get("runs") or []
+    return bool(runs) and all(run.get("theme") for run in runs)
+
+
+def _low_contrast(slide_index, shapes, background_hex, template=(), follows_background=None):
     from ppt_com.themes import _contrast_ratio
 
     findings = []
@@ -1111,8 +1410,8 @@ def _low_contrast(slide_index, shapes, background_hex):
         text = shape.get("text")
         if not shape.get("visible", True) or not text or not text.get("chars"):
             continue
-        backdrop = _backdrop_colour(shape, shapes, background_hex)
-        if not backdrop:
+        backdrop, source = _backdrop(shape, shapes, background_hex, template)
+        if not backdrop or _as_designed(shape, source, follows_background):
             continue
         worst = None
         for run in text.get("runs") or []:
@@ -1550,6 +1849,53 @@ def _uneven_sizes(slide_index, layout):
                 severity="warning",
                 sizes_pt={name: round(size, 1) for name, size in sizes.items()},
             ))
+    return findings + _uneven_along(slide_index, layout, seen)
+
+
+def _uneven_along(slide_index, layout, seen):
+    """A row whose cards are not one width, or a column not one height.
+
+    Along the row a size can be a design, a wide card beside two narrow ones,
+    so only the clear case is reported: three or more like shapes, most of
+    them one size, and the rest within a quarter of it. That is a card
+    stretched by accident, often into whatever is beside the row.
+    """
+    boxes = layout["boxes"]
+    findings = []
+    for groups, measure, field, word, kind, direction in (
+        (layout["rows"], _width, "width", "wide", "row", "horizontal"),
+        (layout["columns"], _height, "height", "tall", "column", "vertical"),
+    ):
+        for names in groups.values():
+            key = ("along", tuple(names))
+            if key in seen or len(names) < 3:
+                continue
+            seen.add(key)
+            sizes = {name: measure(boxes[name]) for name in names}
+            clusters = _clusters(list(sizes.items()), _SIZE_TOLERANCE)
+            usual = clusters[0]
+            if len(clusters) < 2 or 2 * len(usual) <= len(names):
+                continue
+            size = sorted(v for _, v in usual)[len(usual) // 2]
+            odd = [name for name in names if name not in dict(usual)]
+            if any(abs(sizes[name] - size) > _ALONG_SIZE_SLIP * size for name in odd):
+                continue
+            if _featured(names, sizes, layout):
+                continue
+            described = "; ".join(
+                f"{_pt(sizes[name])} for '{name}'" for name in odd
+            ) + f"; {_pt(size)} for the rest"
+            fix = (f"Make {', '.join(repr(n) for n in odd)} {_pt(size)} {word} like the rest "
+                   f"(ppt_update_shape shape_names={odd} {field}={_num(size)})")
+            if any(name != names[-1] for name in odd):
+                fix += (f", then ppt_distribute_shapes with shape_names={names} and "
+                        f"direction='{direction}' to even the gaps again")
+            findings.append(_finding(
+                slide_index, "uneven_sizes", names,
+                f"A {kind} of like shapes is not one {field}: {described}.",
+                fix + ".", severity="warning",
+                sizes_pt={name: round(v, 1) for name, v in sizes.items()},
+            ))
     return findings
 
 
@@ -1730,12 +2076,15 @@ def slide_findings(slide, slide_w, slide_h, only=None):
     """
     index = slide["slide_index"]
     shapes = slide["shapes"]
+    template = slide.get("template") or []
     layout = _layout(shapes, slide_w, slide_h)
     findings = (
         _off_slide(index, shapes, slide_w, slide_h, layout)
         + _overflow(index, shapes, layout)
         + _overlap(index, shapes, layout)
-        + _low_contrast(index, shapes, slide.get("background_hex"))
+        + _template_collisions(index, shapes, template, layout)
+        + _low_contrast(index, shapes, slide.get("background_hex"), template,
+                        slide.get("follows_background"))
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
@@ -1858,8 +2207,35 @@ def deck_findings(slides, slide_h, slide_w=None):
     for field in ("left", "top"):
         groups = _clusters([(i, _title_edge(t, field)) for i, t in titled], _NEAR_MISS)
         usual[field] = sorted(v for _, v in groups[0])[len(groups[0]) // 2]
+    # A title placeholder far from where the others start is where its layout
+    # put it, in the size and colour the layout gave it for that place: a
+    # caption layout's title in its side column. It is the template's design,
+    # so it is held to none of the others. A title box of the caller's own is.
+    if slide_w:
+        titled = [(i, t) for i, t in titled
+                  if t.get("placeholder_type") not in _TITLE_PLACEHOLDERS
+                  or abs(_title_edge(t, "left") - usual["left"]) <= _TITLE_ELSEWHERE * slide_w]
+        if len(titled) < _MIN_TITLED_SLIDES:
+            return []
     elsewhere = {i for i, t in titled
                  if _title_spot_taken(t, by_index[i], usual["left"], usual["top"], slide_w, slide_h)}
+    # Each layout of a template sets its own title: a caption layout's smaller,
+    # a statement layout's larger. When most titles are the template's, the
+    # template is what the deck follows, and a title it styled differs from
+    # those on other layouts by design; it is held only to titles on its own
+    # layout. A title the caller drew or recoloured is held to all of them.
+    # When most titles are the caller's own, the deck follows those, and every
+    # title is held to them.
+    styled = {i: _template_title(t) for i, t in titled}
+    layout_of = {i: by_index[i].get("layout") for i, _ in titled}
+
+    def held(i, usual):
+        if not styled[i]:
+            return True
+        theirs = [j for j in usual if styled[j]]
+        if 2 * len(theirs) <= len(usual):
+            return True
+        return any(layout_of[j] == layout_of[i] for j in theirs)
 
     findings = []
     for label, read, tolerance, field in (
@@ -1873,6 +2249,11 @@ def deck_findings(slides, slide_h, slide_w=None):
         if len(groups) < 2:
             continue
         usual = groups[0]
+        members = [j for j, _ in usual]
+        groups = [usual] + [kept for kept in (
+            [(i, v) for i, v in g if held(i, members)] for g in groups[1:]) if kept]
+        if len(groups) < 2:
+            continue
         usual_value = sorted(v for _, v in usual)[len(usual) // 2]
         described = "; ".join(
             f"{round(sorted(v for _, v in g)[len(g) // 2], 1):g} pt on "
@@ -1898,27 +2279,35 @@ def deck_findings(slides, slide_h, slide_w=None):
     findings += _title_differences(
         "weight", [(index, title, _title_weight(title)) for index, title in titled],
         lambda value: f"in {value}" if value == "bold" else "in regular weight",
-        lambda value: f"bold={'true' if value == 'bold' else 'false'}",
+        lambda value: f"bold={'true' if value == 'bold' else 'false'}", held,
     )
     # A layout's title placeholder is set in the theme's heading font, and a
     # title box of one's own in the body font, so a deck mixing the two has
     # titles in two typefaces.
     findings += _title_differences(
         "font", [(index, title, _title_font(title)) for index, title in titled],
-        lambda value: f"in {value}", lambda value: f"font_name='{value}'",
+        lambda value: f"in {value}", lambda value: f"font_name='{value}'", held,
     )
     by_backdrop = {}
     for index, title in titled:
         slide = by_index[index]
-        backdrop = _backdrop_colour(title, slide["shapes"], slide.get("background_hex"))
+        backdrop = _backdrop_colour(title, slide["shapes"], slide.get("background_hex"),
+                                    slide.get("template"))
         if backdrop:
             by_backdrop.setdefault(backdrop, []).append((index, title, _title_colour(title)))
     for entries in by_backdrop.values():
         findings += _title_differences(
             "colour", entries, lambda value: f"to {value}",
-            lambda value: f"color='{value}'",
+            lambda value: f"color='{value}'", held,
         )
     return findings
+
+
+def _template_title(title) -> bool:
+    """Whether a title is a placeholder still in the template's own colours."""
+    runs = (title.get("text") or {}).get("runs") or []
+    return (title.get("placeholder_type") in _TITLE_PLACEHOLDERS and bool(runs)
+            and all(run.get("theme") for run in runs))
 
 
 def _title_spot_taken(title, slide, left, top, slide_w, slide_h):
@@ -1966,8 +2355,12 @@ def _title_colour(title):
     return max(set(colours), key=colours.count) if colours else None
 
 
-def _title_differences(label, entries, as_words, as_call):
-    """Titles that differ in a setting with no in-between, a weight or a colour."""
+def _title_differences(label, entries, as_words, as_call, held=None):
+    """Titles that differ in a setting with no in-between, a weight or a colour.
+
+    ``held(i, usual)`` says whether slide i's title is held to the titles of
+    the slides in ``usual``; one that is not is not reported.
+    """
     groups = {}
     for index, title, value in entries:
         if value is not None:
@@ -1975,6 +2368,13 @@ def _title_differences(label, entries, as_words, as_call):
     if len(groups) < 2 or sum(len(g) for g in groups.values()) < _MIN_TITLED_SLIDES:
         return []
     ordered = sorted(groups.items(), key=lambda item: (-len(item[1]), min(i for i, _ in item[1])))
+    if held is not None:
+        usual_members = [j for j, _ in ordered[0][1]]
+        ordered = [ordered[0]] + [(value, kept) for value, kept in (
+            (value, [(i, t) for i, t in members if held(i, usual_members)])
+            for value, members in ordered[1:]) if kept]
+        if len(ordered) < 2:
+            return []
     usual = ordered[0][0]
     odd = sorted(i for _, members in ordered[1:] for i, _ in members)
     names = [t["name"] for _, members in ordered[1:] for _, t in members]
@@ -2010,6 +2410,14 @@ def _title_moves(field, value, odd, titled, by_index):
                 parts.append(f"on slide {index}, ppt_set_textframe vertical_anchor='top' "
                              f"on '{title['name']}', which sets its text at the top of "
                              "its frame, where the other titles' text is")
+                continue
+            if down not in ("top", "full") and title["top"] + by < -_EDGE_TOLERANCE:
+                # Its line sits low in a tall frame, and moving the frame far
+                # enough to lift it would take the frame off the slide.
+                top = max(0.0, value - margins["top"])
+                parts.append(f"on slide {index}, ppt_set_textframe vertical_anchor='top' "
+                             f"on '{title['name']}' and then ppt_update_shape top={_num(top)} "
+                             "on it, which sets its text where the other titles' text is")
                 continue
         along = [shape["name"] for shape in by_index[index]["shapes"]
                  if shape is not title and abs(shape[field] - title[field]) <= _ALIGNED]
@@ -2151,13 +2559,18 @@ def _text_facts(shape, full):
             if not run.Text.strip():
                 continue
             font = run.Font
+            try:
+                # A theme colour is the template's choice, an RGB one the caller's.
+                theme = font.Color.ObjectThemeColor != 0
+            except Exception:
+                theme = None
             styles.add((int_to_hex(font.Color.RGB), round(font.Size, 1),
-                        font.Bold == msoTrue, getattr(font, "Name", None) or None))
+                        font.Bold == msoTrue, getattr(font, "Name", None) or None, theme))
         except Exception:
             continue
     facts["runs"] = [
-        {"color_hex": colour, "size": size, "bold": bold, "font": name}
-        for colour, size, bold, name in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
+        {"color_hex": colour, "size": size, "bold": bold, "font": name, "theme": theme}
+        for colour, size, bold, name, theme in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
     return facts
 
@@ -2283,6 +2696,54 @@ def _background_hex(slide):
     return None
 
 
+# Below anything on the slide itself, which counts from 1.
+_TEMPLATE_Z = -10_000
+
+
+def _template_facts(slide):
+    """The graphics the slide's master and layout draw on it.
+
+    A logo, a band down one side, a footer line: every slide made from the
+    template has them, and the slide's own shapes have to keep clear of them.
+    Placeholders are left out, since the slide has its own copies of those. The
+    master's come first, being drawn first, and all of them below the slide's.
+    """
+    graphics = []
+    try:
+        if slide.DisplayMasterShapes != msoTrue:
+            return graphics
+    except Exception:
+        logger.debug("Cannot tell whether the slide shows its template graphics", exc_info=True)
+    sources = []
+    try:
+        if slide.CustomLayout.DisplayMasterShapes == msoTrue:
+            sources.append(("master", slide.Master.Shapes))
+    except Exception:
+        logger.debug("Cannot read the master's graphics", exc_info=True)
+    try:
+        sources.append(("layout", slide.CustomLayout.Shapes))
+    except Exception:
+        logger.debug("Cannot read the layout's graphics", exc_info=True)
+    for source, collection in sources:
+        try:
+            count = collection.Count
+        except Exception:
+            continue
+        for i in range(1, count + 1):
+            try:
+                shape = collection(i)
+                if shape.Type == msoPlaceholder:
+                    continue
+                facts = _geometry_facts(shape, _TEMPLATE_Z + len(graphics))
+                _read_appearance(facts, shape, False)
+            except Exception:
+                logger.debug("Cannot read a %s graphic", source, exc_info=True)
+                continue
+            facts["source"] = source
+            graphics.append(facts)
+    return graphics
+
+
 def _slide_facts_impl(slide_indices, navigate, detail):
     """Read the slides into the plain dicts the checks work on.
 
@@ -2312,12 +2773,18 @@ def _slide_facts_impl(slide_indices, navigate, detail):
             layout = None
         refs = [slide.Shapes(z) for z in range(1, slide.Shapes.Count + 1)]
         shapes = read_shapes(refs, _geometry_facts, _read_appearance, detail)
+        try:
+            follows = slide.FollowMasterBackground == msoTrue
+        except Exception:
+            follows = None
         facts["slides"].append({
             "slide_index": slide_index,
             "layout": layout,
             "background_hex": (
                 _background_hex(slide) if needs_background(shapes, detail) else None
             ),
+            "follows_background": follows,
+            "template": _template_facts(slide),
             "shapes": shapes,
         })
     return facts
@@ -2418,7 +2885,8 @@ def register_tools(mcp):
 
         - off_slide: a shape, or its text, reaches past a slide edge
         - overflow: text needs more room than its box gives it
-        - overlap: text runs into another shape or other text
+        - overlap: text runs into another shape or other text, or something
+          the slide added runs into the template's own logo, band or footer
         - low_contrast: text colour against what is behind it is below the
           WCAG minimum for its size
         - cramped_text: text on a card pressed against one of its edges
@@ -2427,12 +2895,13 @@ def register_tools(mcp):
         - misaligned: edges a few points apart that were meant to line up
         - uneven_spacing: a row or column of like shapes with unequal gaps
         - uneven_sizes: like shapes in a row (or column) that are not one
-          height (or width)
+          height (or width), or one card in a row a little wider than the rest
         - empty_placeholder: a placeholder left without text
         - sample_text: text a template or a draft left to be replaced, such
           as lorem ipsum, "Your title here", "[Company name]" or "XX%"
-        - inconsistent_titles (whole deck only): titles that differ in size or
-          position between slides with the same layout
+        - inconsistent_titles (whole deck only): titles that differ in size,
+          position, weight, typeface or colour from slide to slide; the
+          title each layout of a template styles for itself is left as it is
 
         Run it when a slide is finished, and on the whole deck before calling
         it done. A slide with no issues is finished as far as geometry goes;

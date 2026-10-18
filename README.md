@@ -291,17 +291,19 @@ Auto-fix strategies include widening text boxes and inserting soft returns.
 `ppt_check_layout` measures a slide, or the whole deck, and reports what is wrong as numbers rather than as a picture, so it works whether or not the model can read images:
 - **Off the slide** — a shape, or its text, reaching past a slide edge
 - **Overflow** — text that needs more room than its box gives it
-- **Overlap** — text running into another shape or into other text
+- **Overlap** — text running into another shape or into other text, and anything a slide adds running into the template's own graphics: its logo, a band down the side, a footer line
 - **Low contrast** — text against what is behind it, below the WCAG minimum for its size
 - **Cramped text** — text on a card pressed against one of its edges
 - **Narrow margin** — a shape closer to the side of the slide than the margin the rest of the slide keeps
 - **Misaligned** — edges a few points apart that were meant to line up
 - **Uneven spacing** — a row or column of like shapes with unequal gaps
-- **Uneven sizes** — like shapes in a row that are not one height, or in a column not one width
+- **Uneven sizes** — like shapes in a row that are not one height, or in a column not one width, and a row with one card a little wider than the rest
 - **Sample text** — lorem ipsum, "Your title here", "[Company name]" or "XX%" left behind by a template or a draft
 - **Empty placeholders**, and, for the whole deck, **titles** that change size, position, weight, typeface or colour from slide to slide
 
 Each issue names the shapes and says how to fix it, with the tool call and its values. A fix keeps the slide together rather than only clearing the issue: a card grows with its padding and the rest of its row, and a shape brought back onto the slide keeps the slide's margin. The tools that add, move, resize, align, distribute or retext a shape also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it.
+
+On a deck made from a template, the template is part of the check. The graphics its slide master and layouts draw are read, so a chart sized over the logo or a footnote on the confidentiality line is reported, and what the template designed is taken as meant: a placeholder still in the theme's colours, or a caption layout's own smaller title, is not held to the rest. PowerPoint for Mac exposes the master's graphics but not a layout's own, so there a layout's design is allowed for through its placeholders.
 
 ## ⚙️ Advanced Configuration
 

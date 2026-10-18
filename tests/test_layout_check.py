@@ -683,10 +683,10 @@ class FakeRange:
     def Runs(self, i=None):
         if i is None:
             return SimpleNamespace(Count=len(self._runs))
-        text, rgb, size, bold = self._runs[i - 1]
+        text, rgb, size, bold, *theme = self._runs[i - 1]
         return SimpleNamespace(Text=text, Font=SimpleNamespace(
-            Color=SimpleNamespace(RGB=rgb), Size=size, Bold=bold,
-            Name="Calibri Light" if size >= 30 else "Calibri"))
+            Color=SimpleNamespace(RGB=rgb, ObjectThemeColor=theme[0] if theme else 0),
+            Size=size, Bold=bold, Name="Calibri Light" if size >= 30 else "Calibri"))
 
     def Paragraphs(self, i):
         return SimpleNamespace(ParagraphFormat=SimpleNamespace(Alignment=self._alignment))
@@ -725,9 +725,16 @@ class TestTheWindowsReader:
                 ("   ", 0xFFFFFF, 99.0, msoFalse), ("again", 0x000000, 12.0, msoFalse)]
         words = layout_check._shape_facts(fake_shape(runs=runs), 1, None)["text"]
         assert words["runs"] == [
-            {"color_hex": "#000000", "size": 12.0, "bold": False, "font": "Calibri"},
-            {"color_hex": "#000000", "size": 40.0, "bold": True, "font": "Calibri Light"},
+            {"color_hex": "#000000", "size": 12.0, "bold": False, "font": "Calibri", "theme": False},
+            {"color_hex": "#000000", "size": 40.0, "bold": True, "font": "Calibri Light",
+             "theme": False},
         ]
+
+    def test_a_theme_colour_is_told_from_one_the_caller_set(self):
+        # msoThemeColorText1 is 13; a colour set by RGB reads msoNotThemeColor, 0.
+        runs = [("Mine ", 0x000000, 20.0, msoFalse, 0), ("template's", 0x000000, 20.0, msoFalse, 13)]
+        words = layout_check._shape_facts(fake_shape(runs=runs), 1, None)["text"]
+        assert sorted(run["theme"] for run in words["runs"]) == [False, True]
 
     def test_a_bound_powerpoint_will_not_give_stays_unknown(self):
         words = layout_check._shape_facts(fake_shape(bounds=None), 1, None)["text"]
@@ -929,6 +936,101 @@ class TestASecondRealDeck:
 
     def test_the_fixed_deck_is_clean(self):
         deck = recorded("realdeck2_fixed_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
+def fixes_of(deck):
+    fixes = {}
+    for s in deck["slides"]:
+        for f in slide_findings(s, deck["slide_width"], deck["slide_height"]):
+            fixes.setdefault((s["slide_index"], f["type"]), f["fix"])
+    return fixes
+
+
+class TestAThemedDeck:
+    # Ten slides on PowerPoint's Badge theme, built through its layouts and
+    # placeholders: a dark band down the left edge and a yellow strip down the
+    # right, both on the slide master, and a title font of its own. The title,
+    # section and caption layouts draw a design of their own, which PowerPoint
+    # for Mac cannot read.
+    SEEN = {
+        1: [],                                          # title slide
+        2: [],                                          # agenda in the body placeholder
+        3: [("empty_placeholder", "Text Placeholder 4")],  # section header, text left empty
+        4: [("overlap", "TextBox 4")],                  # a source note on the dark band
+        5: [],                                          # comparison layout
+        6: [],                                          # ten bullets, shrunk to fit
+        7: [("overlap", "TextBox 1")],                  # a hand-drawn title on the band
+        8: [],                                          # caption layout: light text on its own panel
+        9: [("overlap", "Shape_2"),                     # the last card over the yellow strip
+            ("uneven_sizes", "Shape_0")],               # and wider than the other two
+        10: [],                                         # closing section header
+    }
+
+    def test_each_slide_reports_what_its_screenshot_shows(self):
+        assert findings_by_slide(recorded("themedeck_broken_mac")) == self.SEEN
+
+    def test_the_hand_drawn_title_is_the_only_odd_one(self):
+        # The caption layout's small yellow title in its side column is the
+        # theme's, and is not held to the others.
+        deck = recorded("themedeck_broken_mac")
+        found = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert {f["message"].split(":")[0] for f in found} == {
+            f"Slide titles differ in {what}"
+            for what in ("size", "left edge", "weight", "font", "colour")
+        }
+        assert all(f["slides"] == [7] for f in found)
+
+    def test_the_fixes_say_what_was_done(self):
+        fixes = fixes_of(recorded("themedeck_broken_mac"))
+        # Clear of the band and in line with the title, not just clear of it.
+        assert fixes[(4, "overlap")] == (
+            "Move 'TextBox 4' right by 78.6 pt, in line with 'Title 2' "
+            "(ppt_update_shape dleft=78.56), clear of 'Freeform 6'.")
+        # A card in a row takes the row's width back rather than moving.
+        assert "width=255" in fixes[(9, "overlap")] and "like the rest of its row" in fixes[(9, "overlap")]
+
+    def test_the_fixed_deck_is_clean(self):
+        deck = recorded("themedeck_fixed_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
+class TestACompanyTemplateDeck:
+    # Ten slides on a company-style template: a navy bar across the top, an
+    # ACME logo bottom right and a confidentiality line bottom left, on the
+    # master; Georgia titles, Arial text, layouts of its own.
+    SEEN = {
+        1: [], 2: [], 3: [],
+        4: [("overlap", "Chart 3")],                    # a chart over the logo and the line
+        5: [("overlap", "TextBox 12")],                 # a footnote on the confidentiality line
+        6: [], 7: [],                                   # (7: its title is the deck's finding)
+        8: [],                                          # caption layout, its own small title
+        9: [("overlap", "TextBox 4")],                  # a contact line on the logo
+        10: [],
+    }
+
+    def test_each_slide_reports_what_its_screenshot_shows(self):
+        assert findings_by_slide(recorded("companydeck_broken_mac")) == self.SEEN
+
+    def test_only_the_hand_drawn_title_is_odd(self):
+        deck = recorded("companydeck_broken_mac")
+        found = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert found and all(f["slides"] == [7] for f in found)
+
+    def test_the_fixes_say_what_was_done(self):
+        fixes = fixes_of(recorded("companydeck_broken_mac"))
+        # The chart is trimmed above the footer rather than pushed into the title.
+        assert fixes[(4, "overlap")].startswith("Make 'Chart 3' 394 pt tall (ppt_update_shape height=394)")
+        # A footnote steps up over the line, not across the slide.
+        assert fixes[(5, "overlap")].startswith("Move 'TextBox 12' up by 13 pt")
+        assert fixes[(9, "overlap")].startswith("Move 'TextBox 4' up by 22 pt")
+
+    def test_the_fixed_deck_is_clean(self):
+        # Fixed, the hand-drawn title matches the others, and the caption
+        # layout's own title is still not held to them.
+        deck = recorded("companydeck_fixed_mac")
         assert all(found == [] for found in findings_by_slide(deck).values())
         assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
 
@@ -1208,3 +1310,266 @@ class TestFindingTheTitle:
                          runs=[{"color_hex": "#222222", "size": 32.0, "bold": True}])
         slides = [page(2), page(3), page(4), slide(photo, beside, index=5)]
         assert deck_findings(slides, H, W) == []
+
+
+# ---------------------------------------------------------------------------
+# A template's own graphics, colours and titles
+# ---------------------------------------------------------------------------
+def graphic(name, left, top, width, height, colour="#0B2545", source="master", z=-10_000, **extra):
+    """A graphic the slide master or layout draws: a band, a logo, a bar."""
+    facts = card(name, left, top, width, height, z=z, colour=colour)
+    facts["source"] = source
+    facts.update(extra)
+    return facts
+
+
+def template_text(name, left, top, width, height, text_width, text_height):
+    """A line of text the template draws, a confidentiality notice, with no fill."""
+    facts = textbox(name, left, top, width, height, z=-9_000,
+                    text_width=text_width, text_height=text_height)
+    facts["text"].update(left=left, top=top)
+    facts["source"] = "master"
+    return facts
+
+
+def templated(*shapes, template=(), index=1, background="#FFFFFF", layout="title only",
+              follows=True):
+    page = slide(*shapes, index=index, background=background, layout=layout)
+    page["template"] = list(template)
+    page["follows_background"] = follows
+    return page
+
+
+def check_on(template, *shapes, **kwargs):
+    return slide_findings(templated(*shapes, template=template, **kwargs), W, H)
+
+
+def overlaps(findings):
+    return [f for f in findings if f["type"] == "overlap"]
+
+
+BAND = graphic("band", 0, 0, 70, 540)
+STRIP = graphic("strip", 937.68, 0, 22.32, 540, colour="#F8B323")
+LOGO = graphic("logo", 858, 500, 72, 24, colour="#13A89E")
+LINE = template_text("notice", 40, 503, 220, 18, text_width=140, text_height=15)
+
+
+def title_placeholder(name="Title 1", left=98.56, top=30, size=28.0, colour="#0B2545",
+                      theme=True, layout_type=layout_check.ppPlaceholderTitle):
+    title = textbox(name, left, top, 800, 56, runs=[
+        {"color_hex": colour, "size": size, "bold": True, "font": "Georgia", "theme": theme}])
+    title["type"] = msoPlaceholder
+    title["placeholder_type"] = layout_type
+    return title
+
+
+class TestTheTemplatesOwnGraphics:
+    def test_text_on_a_band_down_the_side_is_moved_clear_of_it(self):
+        note = textbox("note", 20, 478, 320, 24)
+        [found] = overlaps(check_on([BAND], note))
+        assert found["shapes"] == ["note", "band"]
+        assert "part of the template drawn by the slide master" in found["message"]
+        assert found["fix"].startswith("Move 'note' right by")
+        assert found["fix"].endswith("leaves 6 pt between it and 'band'.")
+
+    def test_it_goes_on_to_line_up_with_the_content_when_that_is_near(self):
+        note = textbox("note", 20, 478, 320, 24)
+        found = overlaps(check_on([BAND], title_placeholder(), note))
+        assert found[0]["fix"].startswith("Move 'note' right by 78.6 pt, in line with 'Title 1'")
+
+    def test_a_footnote_steps_up_rather_than_across_the_slide(self):
+        cards = [card(f"c{i}", 40 + 305 * i, 150, 270, 200, z=2 + i) for i in range(3)]
+        footnote = textbox("footnote", 40, 498, 400, 20, z=9, text_width=280, text_height=14)
+        [found] = overlaps(check_on([LINE], *cards, footnote))
+        assert found["fix"].startswith("Move 'footnote' up by")
+
+    def test_a_card_in_a_row_takes_the_rows_width_back(self):
+        cards = [card("c0", 99, 180, 255, 200, z=2), card("c1", 374, 180, 255, 200, z=3),
+                 card("c2", 649, 180, 300, 200, z=4)]
+        found = check_on([BAND, STRIP], *cards)
+        [hit] = overlaps(found)
+        assert hit["shapes"] == ["c2", "strip"]
+        assert hit["fix"].startswith("Make 'c2' 255 pt wide like the rest of its row (ppt_update_shape width=255)")
+
+    def test_a_chart_over_the_footer_is_trimmed_not_pushed_into_the_title(self):
+        title = title_placeholder(left=40)
+        chart = card("Chart 3", 40, 100, 880, 420, z=2)
+        chart["type"] = layout_check.msoChart
+        [found] = overlaps(check_on([LOGO, LINE], title, chart))
+        assert found["fix"].startswith("Make 'Chart 3' 394 pt tall (ppt_update_shape height=394)")
+
+    def test_covering_a_graphic_whole_is_reported(self):
+        badge = card("badge", 800, 440, 150, 100, z=2)
+        [found] = overlaps(check_on([LOGO], badge))
+        assert found["message"].startswith("'badge' covers 'logo'")
+
+    def test_a_placeholder_is_where_its_layout_put_it(self):
+        body = textbox("Content 2", 60, 72, 485, 392)
+        body["type"], body["placeholder_type"] = msoPlaceholder, 7
+        assert overlaps(check_on([BAND], body)) == []
+
+    def test_text_wholly_on_a_panel_is_judged_against_the_panel(self):
+        panel = graphic("panel", 600, 0, 360, 540, colour="#2A1A00", source="layout")
+        light = textbox("light", 640, 100, 280, 40, runs=[{"color_hex": "#F3F3F2", "size": 20.0, "bold": False}])
+        dark = textbox("dark", 640, 200, 280, 40, runs=[{"color_hex": "#222222", "size": 20.0, "bold": False}])
+        found = check_on([panel], light, dark)
+        assert overlaps(found) == []
+        [contrast] = [f for f in found if f["type"] == "low_contrast"]
+        assert contrast["shapes"] == ["dark"] and contrast["backdrop_color"] == "#2A1A00"
+
+    def test_a_backdrop_picture_is_no_obstacle_and_no_colour(self):
+        texture = graphic("texture", 0, 0, 960, 540, type=msoPicture)
+        pale = textbox("pale", 100, 100, 300, 40, runs=[{"color_hex": "#FFFFFF", "size": 20.0, "bold": False}])
+        assert check_on([texture], pale) == []
+
+    def test_a_slide_without_template_facts_is_checked_as_before(self):
+        note = textbox("note", 20, 478, 320, 24)
+        assert overlaps(check(note)) == []
+
+
+class TestTheTemplatesOwnColours:
+    def light_title(self, theme=True):
+        return title_placeholder(colour="#F3F3F2", theme=theme)
+
+    def test_a_placeholder_in_theme_colours_is_taken_as_meant(self):
+        # A caption layout's light title on a dark panel the Mac cannot read.
+        found = check_on([], self.light_title(), background="#F3F3F2")
+        assert [f for f in found if f["type"] == "low_contrast"] == []
+
+    def test_the_same_placeholder_coloured_by_the_caller_is_checked(self):
+        found = check_on([], self.light_title(theme=False), background="#F3F3F2")
+        assert [f["shapes"] for f in found if f["type"] == "low_contrast"] == [["Title 1"]]
+
+    def test_a_text_box_in_theme_colours_is_still_the_callers(self):
+        box = textbox("box", 100, 100, 300, 40,
+                      runs=[{"color_hex": "#F3F3F2", "size": 20.0, "bold": False, "theme": True}])
+        found = check_on([], box, background="#F3F3F2")
+        assert [f["shapes"] for f in found if f["type"] == "low_contrast"] == [["box"]]
+
+    def test_a_background_the_caller_changed_is_the_callers(self):
+        found = check_on([], self.light_title(), background="#F3F3F2", follows=False)
+        assert [f["shapes"] for f in found if f["type"] == "low_contrast"] == [["Title 1"]]
+
+
+def themed_title_slide(index, layout, size=28.0, left=98.56, theme=True, name=None,
+                       placeholder=True, colour="#0B2545"):
+    if placeholder:
+        title = title_placeholder(name or f"Title {index}", left=left, size=size,
+                                  theme=theme, colour=colour)
+    else:
+        title = textbox(name or f"TextBox {index}", left, 30, 800, 56, runs=[
+            {"color_hex": colour, "size": size, "bold": True, "font": "Georgia", "theme": theme}])
+    return templated(title, index=index, layout=layout)
+
+
+class TestATemplatesTitles:
+    def test_a_caption_layouts_title_in_its_side_column_is_not_compared(self):
+        slides = [themed_title_slide(i, "title only") for i in (2, 3, 4)]
+        slides.append(themed_title_slide(5, "content with caption", size=19.0, left=656.5))
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_layouts_own_smaller_title_is_not_compared_when_the_template_leads(self):
+        slides = [themed_title_slide(i, "title only") for i in (2, 3, 4)]
+        slides.append(themed_title_slide(5, "content with caption", size=20.0))
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_title_box_of_the_callers_own_is_held_to_the_templates(self):
+        slides = [themed_title_slide(i, "title only") for i in (2, 3, 4)]
+        slides.append(themed_title_slide(5, "blank", size=36.0, theme=False, placeholder=False))
+        found = deck_findings(slides, H, W)
+        assert found and all(f["slides"] == [5] for f in found)
+
+    def test_when_the_callers_own_titles_lead_a_template_title_is_held_to_them(self):
+        # The first real deck: titles drawn as boxes on blank slides, and one
+        # slide on the layout's own placeholder, which jumps between them.
+        slides = [themed_title_slide(i, "blank", size=32.0, theme=False, placeholder=False,
+                                     colour="#1F2937") for i in (2, 3, 4)]
+        slides.append(themed_title_slide(5, "title and content", size=44.0))
+        found = deck_findings(slides, H, W)
+        assert found and all(f["slides"] == [5] for f in found)
+
+    def test_titles_on_one_layout_are_still_held_to_each_other(self):
+        slides = [themed_title_slide(i, "title only") for i in (2, 3, 4)]
+        slides.append(themed_title_slide(5, "title only", size=32.0))
+        [found] = deck_findings(slides, H, W)
+        assert found["slides"] == [5] and "size" in found["message"]
+
+    def test_a_title_low_in_a_tall_frame_is_anchored_not_moved_off_the_slide(self):
+        def boxed(index, frame_top, text_top):
+            title = placed(f"Title {index}", 98.56, frame_top, 801.44, 117.6, 105.8, text_top, 300, 38)
+            title["text"]["runs"] = [{"color_hex": "#2A1A00", "size": 40.0, "bold": False}]
+            return slide(title, index=index)
+        slides = [boxed(i, 30.0, 33.7) for i in (2, 3, 4)] + [boxed(5, 36.0, 103.8)]
+        [top] = [f for f in deck_findings(slides, H, W) if "top edge" in f["message"]]
+        assert "vertical_anchor='top'" in top["fix"] and "top=30.1" in top["fix"]
+        assert "top=-" not in top["fix"]
+
+
+class TestUnevenWidths:
+    def row(self, *widths, colours=None):
+        shapes, left = [], 99.0
+        for i, width in enumerate(widths):
+            shapes.append(card(f"c{i}", left, 180, width, 200, z=2 + i,
+                               colour=(colours or ["#FFFFFF"] * len(widths))[i]))
+            left += width + 20
+        return shapes
+
+    def sizes(self, *shapes):
+        return [f for f in check(*shapes) if f["type"] == "uneven_sizes"]
+
+    def test_a_card_wider_than_the_two_beside_it_is_reported(self):
+        [found] = self.sizes(*self.row(255, 255, 300))
+        assert "not one width" in found["message"]
+        assert found["fix"].startswith("Make 'c2' 255 pt wide like the rest")
+        assert "ppt_distribute_shapes" not in found["fix"]
+
+    def test_a_middle_card_made_narrow_again_needs_the_gaps_evened(self):
+        [found] = self.sizes(*self.row(255, 300, 255))
+        assert "ppt_distribute_shapes" in found["fix"]
+
+    def test_two_cards_of_two_widths_are_a_design(self):
+        assert self.sizes(*self.row(560, 255)) == []
+
+    def test_a_much_wider_card_is_a_design(self):
+        assert self.sizes(*self.row(200, 200, 300)) == []
+
+    def test_a_featured_card_is_meant(self):
+        assert self.sizes(*self.row(255, 300, 255, colours=["#FFFFFF", "#2563EB", "#FFFFFF"])) == []
+
+
+class FakeCollection:
+    def __init__(self, shapes):
+        self._shapes = shapes
+        self.Count = len(shapes)
+
+    def __call__(self, i):
+        return self._shapes[i - 1]
+
+
+class TestReadingATemplatesGraphics:
+    def fake(self, shows=msoTrue, layout_shows=msoTrue):
+        band = fake_shape(name="Band")
+        band.Type, band.Left, band.Width, band.HasTextFrame = msoAutoShape, 0.0, 70.0, msoFalse
+        band.Fill = SimpleNamespace(Visible=msoTrue, Type=msoFillSolid,
+                                    ForeColor=SimpleNamespace(RGB=0x00), Transparency=0.0)
+        title = fake_shape(name="Title Placeholder 1")
+        title.Type = msoPlaceholder
+        title.PlaceholderFormat = SimpleNamespace(Type=1)
+        panel = fake_shape(name="Panel")
+        panel.Type, panel.HasTextFrame = msoAutoShape, msoFalse
+        layout = SimpleNamespace(DisplayMasterShapes=layout_shows, Shapes=FakeCollection([panel]))
+        master = SimpleNamespace(Shapes=FakeCollection([band, title]))
+        return SimpleNamespace(DisplayMasterShapes=shows, CustomLayout=layout, Master=master)
+
+    def test_the_master_and_layout_graphics_are_read_without_placeholders(self):
+        graphics = layout_check._template_facts(self.fake())
+        assert [(g["name"], g["source"]) for g in graphics] == [("Band", "master"), ("Panel", "layout")]
+        assert all(g["z"] < 0 for g in graphics)
+        assert graphics[0]["fill"]["visible"] is True
+
+    def test_a_layout_hiding_the_masters_graphics_shows_only_its_own(self):
+        graphics = layout_check._template_facts(self.fake(layout_shows=msoFalse))
+        assert [g["name"] for g in graphics] == ["Panel"]
+
+    def test_a_slide_hiding_background_graphics_has_none(self):
+        assert layout_check._template_facts(self.fake(shows=msoFalse)) == []

@@ -114,13 +114,25 @@ def _frame_state(frame: dict) -> dict:
     }
 
 
+def _theme_flag(index):
+    """Whether a colour is one of the theme's, from its theme index.
+
+    A theme colour is the template's choice; text the caller coloured itself
+    reads ``no theme color``.
+    """
+    index = _value(index)
+    if index is None or isinstance(index, (list, str, int, float)):
+        return None
+    return index not in (k.no_theme_color, k.theme_color_unset)
+
+
 def _run_styles(text_range) -> list:
     """The distinct colour, size and weight the visible characters use.
 
     Most text is set in one style, and the range's own font record answers
     that in one event: a property the characters disagree on reads back as
     ``missing value``, so a record with all three is the whole answer. Mixed
-    text is read as columns, four events however long it is, and when
+    text is read as columns, five events however long it is, and when
     PowerPoint will not answer per character either, nothing is guessed.
     """
     font = _record(text_range.font)
@@ -130,13 +142,15 @@ def _run_styles(text_range) -> list:
     name = _value(font.get(k.font_name))
     if isinstance(colour, list) and isinstance(size, (int, float)) and bold is not None:
         return [{"color_hex": rgb_list_to_hex(colour), "size": round(size, 1),
-                 "bold": bold is True, "font": name if isinstance(name, str) else None}]
+                 "bold": bold is True, "font": name if isinstance(name, str) else None,
+                 "theme": _theme_flag(font.get(k.font_color_theme_index))}]
 
     try:
         chars = text_range.characters
         texts = chars.content.get()
         font = chars.font
-        columns = [font.font_color.get(), font.font_size.get(), font.bold.get()]
+        columns = [font.font_color.get(), font.font_size.get(), font.bold.get(),
+                   font.font_color_theme_index.get()]
         if not isinstance(texts, list) or any(
             not isinstance(column, list) or len(column) != len(texts)
             for column in columns
@@ -148,7 +162,7 @@ def _run_styles(text_range) -> list:
         return []
 
     styles = set()
-    for char, colour, size, bold in rows:
+    for char, colour, size, bold, index in rows:
         if not isinstance(char, str) or not char.strip():
             continue
         colour, size = _value(colour), _value(size)
@@ -156,12 +170,13 @@ def _run_styles(text_range) -> list:
             rgb_list_to_hex(colour) if isinstance(colour, list) else None,
             round(size, 1) if isinstance(size, (int, float)) else None,
             _value(bold) is True,
+            _theme_flag(index),
         ))
     # The typeface would cost one more event per column; mixed text leaves it
     # unknown rather than guessed.
     return [
-        {"color_hex": colour, "size": size, "bold": bold, "font": None}
-        for colour, size, bold in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
+        {"color_hex": colour, "size": size, "bold": bold, "font": None, "theme": theme}
+        for colour, size, bold, theme in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
 
 
@@ -280,6 +295,49 @@ def _background_hex(slide, follows_master):
     return None
 
 
+def _template_facts(slide, shows, cache):
+    """The macOS half of ppt_com.layout_check._template_facts.
+
+    Only the master's graphics can be read here: PowerPoint for Mac answers no
+    shapes for a custom layout. A layout that draws a design of its own, a
+    title or section layout usually, hides the master's graphics and is not
+    seen, which the checks allow for by trusting the template's own colours on
+    its placeholders.
+
+    Most slides of a deck share one master, so a graphic's fill and text are
+    read once per call: ``cache`` holds them by name and position.
+    """
+    from ppt_com.layout_check import _TEMPLATE_Z
+
+    if shows is False:
+        return []
+    try:
+        if not slide.custom_layout.display_master_shapes():
+            return []
+        master = slide.slide_master
+        refs = shapes_of(master)
+        records = elements(master.shapes.properties)
+    except Exception:
+        logger.debug("Cannot read the master's graphics", exc_info=True)
+        return []
+    if len(records) != len(refs):
+        records = [{} for _ in refs]
+    graphics = []
+    for ref, record in zip(refs, records, strict=True):
+        record = record if isinstance(record, dict) else {}
+        facts = _geometry_facts(ref, record, _TEMPLATE_Z + len(graphics))
+        if facts["type"] == msoPlaceholder:
+            continue
+        key = (facts["name"], facts["left"], facts["top"], facts["width"], facts["height"])
+        if key not in cache:
+            _read_appearance(facts, ref, False)
+            facts.pop("_has_text_frame", None)
+            facts["source"] = "master"
+            cache[key] = facts
+        graphics.append({**cache[key], "z": _TEMPLATE_Z + len(graphics)})
+    return graphics
+
+
 def _layout_name(word):
     """The slide's layout, in the words of the dictionary.
 
@@ -301,6 +359,7 @@ def _slide_facts_impl(slide_indices, navigate, detail):
     pres = ppt._get_pres_impl()
     slide_w, slide_h = _slide_dimensions(pres)
     facts = {"slide_width": slide_w, "slide_height": slide_h, "slides": []}
+    template_cache = {}
     for slide_index in slide_indices:
         slide = _slide(pres, slide_index)
         if navigate:
@@ -317,6 +376,7 @@ def _slide_facts_impl(slide_indices, navigate, detail):
             records = [{} for _ in refs]
         own = _record(slide)
         follows = _value(own.get(k.follow_master_background))
+        shows = _value(own.get(k.display_master_shapes))
         records = [r if isinstance(r, dict) else {} for r in records]
         shapes = read_shapes(
             refs,
@@ -333,6 +393,9 @@ def _slide_facts_impl(slide_indices, navigate, detail):
                 _background_hex(slide, True if follows is None else bool(follows))
                 if needs_background(shapes, detail) else None
             ),
+            "follows_background": None if follows is None else bool(follows),
+            "template": _template_facts(
+                slide, None if shows is None else bool(shows), template_cache),
             "shapes": shapes,
         })
     return facts
