@@ -648,8 +648,9 @@ def _layout(shapes, slide_w, slide_h):
             for name in names:
                 (rows if direction == "horizontal" else columns)[name] = names
     painted = [s for s in arranged if depth[s["name"]] == 0 and paints_box(s)]
+    heading = _heading(arranged, slide_h)
     free_text = [s for s in arranged if depth[s["name"]] == 0 and not paints_box(s)
-                 and not _labels_something(s, painted, boxes)]
+                 and not _labels_something(s, painted, boxes) and s["name"] not in heading]
     return {
         "arranged": arranged, "boxes": boxes, "depth": depth,
         "groups": _like_groups(painted, boxes) + _like_groups(free_text, boxes),
@@ -657,6 +658,31 @@ def _layout(shapes, slide_w, slide_h):
         "slide_width": slide_w, "slide_height": slide_h,
         "margins": _margins(arranged, boxes, depth, slide_w, slide_h),
     }
+
+
+# A subtitle sits this close under its title.
+_SUBTITLE_GAP = 30.0
+
+
+def _heading(arranged, slide_h):
+    """The names of the slide's title and the subtitle right under it.
+
+    They head the slide rather than belong to its content, so a column of
+    figures below is not spaced against them: the gap under a heading is
+    meant to be larger.
+    """
+    title = find_title({"shapes": arranged}, slide_h)
+    if title is None:
+        return set()
+    names = {title["name"]}
+    above = text_box(title) or shape_box(title)
+    for shape in arranged:
+        words = text_box(shape)
+        if shape is title or words is None or paints_box(shape):
+            continue
+        if 0 <= words[1] - above[3] <= _SUBTITLE_GAP and abs(words[0] - above[0]) <= _NEAR_MISS:
+            names.add(shape["name"])
+    return names
 
 
 def _labels_something(shape, painted, boxes):
@@ -1982,6 +2008,19 @@ def _misaligned(slide_index, layout, only=None):
     """
     arranged, boxes, depth = layout["arranged"], layout["boxes"], layout["depth"]
     seen = {s["name"]: _seen_edges(s) for s in arranged}
+    # A photo the full height of the slide has its middle at the slide's
+    # middle, which no list beside it is lined up with; likewise across.
+    slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
+    for s in arranged:
+        box, dropped = boxes[s["name"]], set()
+        if slide_h and box[1] <= _EDGE_TOLERANCE and box[3] >= slide_h - _EDGE_TOLERANCE:
+            dropped.add("middle")
+        if slide_w and box[0] <= _EDGE_TOLERANCE and box[2] >= slide_w - _EDGE_TOLERANCE:
+            dropped.add("center")
+        if dropped:
+            edges = seen[s["name"]]
+            every = {"left", "center", "right", "top", "middle", "bottom"}
+            seen[s["name"]] = (every if edges is None else edges) - dropped
     placed = dict(boxes)
     slips = []
     for level in sorted(set(depth.values())):
@@ -2579,11 +2618,15 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
             _, source, painter = _backdrop(shape, shapes, slide.get("background_hex"), template)
             if source == "shape" and painter["name"] in only:
                 drawn_on.add(shape["name"])
+        # Two like shapes of two sizes may be a row or a chart a model is still
+        # drawing, the third bar not yet added; the slide's own check judges
+        # the finished set.
         return _sorted([
             f for f in findings
             if f["type"] in SHAPE_FINDINGS and (
                 any(name in only for name in f["shapes"])
                 or (f["type"] == "low_contrast" and f["shapes"][0] in drawn_on))
+            and not (f["type"] == "uneven_sizes" and len(f["shapes"]) == 2)
         ])
     spacing = _uneven_spacing(index, layout, slide_w)
     # A row whose gaps are reported is put back between the margins by that

@@ -2052,6 +2052,56 @@ class TestBarsOfAChart:
         assert "uneven_sizes" in kinds(check(*self.bars(100, 104, 99, 103)))
 
 
+class TestWhatTheCoffeeDeckTaught:
+    # Live, a deck on coffee built a slide at a time: three kinds of finding
+    # that a model told to act on every finding would have acted on, and
+    # been wrong to.
+    def test_a_photo_the_height_of_the_slide_has_no_middle_to_meet(self):
+        photo = shape("photo", 0, 0, 330, 540, z=1, type=layout_check.msoPicture)
+        step = card("step 3", 387, 248, 38, 38, z=2)
+        assert "misaligned" not in kinds(check(photo, step))
+
+    def test_a_shorter_photo_is_still_lined_up_by_its_middle(self):
+        photo = shape("photo", 0, 100, 330, 340, z=1, type=layout_check.msoPicture)
+        step = card("step 3", 387, 248, 38, 38, z=2)
+        assert "misaligned" in kinds(check(photo, step))
+
+    def figures(self, gaps_from=146):
+        title = placed("title", 450, 38, 450, 52, 457.2, 41.6, 380, 44)
+        title["text"]["runs"] = [{"color_hex": "#F3E9DC", "size": 34.0, "bold": True}]
+        sub = placed("sub", 450, 92, 450, 26, 457.2, 95.6, 260, 19, z=2)
+        shapes = [title, sub]
+        for i in range(3):
+            y = gaps_from + 100 * i
+            big = placed(f"big{i}", 450, y, 450, 50, 457.2, y + 3.6, 300, 44, z=3 + 2 * i)
+            big["text"]["runs"] = [{"color_hex": "#C67C3A", "size": 40.0, "bold": True}]
+            label = placed(f"label{i}", 450, y + 52, 450, 28, 457.2, y + 55.6, 300, 20, z=4 + 2 * i)
+            shapes += [big, label]
+        return shapes
+
+    def test_a_heading_is_not_the_first_of_the_figures_under_it(self):
+        assert "uneven_spacing" not in kinds(check(*self.figures()))
+
+    def test_figures_unevenly_spaced_among_themselves_still_are(self):
+        shapes = self.figures()
+        for s in shapes:
+            if s["name"] in ("big2", "label2"):
+                s["top"] += 8
+                s["text"]["top"] += 8
+        assert "uneven_spacing" in kinds(check(*shapes))
+
+    def test_a_write_does_not_judge_two_bars_of_a_chart_still_being_drawn(self):
+        bars = [card("Colombia", 246, 266, 96.5, 32, z=1), card("Ethiopia", 246, 324, 87.1, 32, z=2)]
+        page = slide(*bars)
+        assert "uneven_sizes" not in kinds(slide_findings(page, W, H, only={"Ethiopia"}))
+        assert "uneven_sizes" in kinds(slide_findings(page, W, H))
+
+    def test_the_finished_deck_is_clean(self):
+        deck = recorded("coffeedeck_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
 class TestADesignedDeckOnTheMac:
     # Twelve slides on beer, built on PowerPoint for Mac through the server:
     # photos, icons, cards with shadows, a timeline, a colour scale, and a bar
