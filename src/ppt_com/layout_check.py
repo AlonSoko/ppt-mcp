@@ -21,6 +21,7 @@ reads a slide into plain dicts; everything after that is pure.
 import json
 import logging
 import math
+import re
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +56,15 @@ _EDGE_TOLERANCE = 0.5
 # the second decimal.
 _ALIGNED = 0.5
 
+# Centres this close are one centre. A text box that grows or shrinks to fit
+# its text keeps its top, so its middle moves by half the change, and a point
+# between two centres cannot be seen the way it can between two edges.
+_ALIGNED_CENTRE = 1.5
+
+# Text this close to a side of its frame's inset keeps to that side: it is set
+# left, right or centred there, or fills the frame.
+_SNUG = 1.5
+
 # Edges this close, and not closer, were meant to line up and do not. Further
 # apart than this is a decision rather than a slip.
 _NEAR_MISS = 4.0
@@ -62,6 +72,9 @@ _NEAR_MISS = 4.0
 # Text has to cover this much of another shape, in both directions, before it
 # counts as running into it. Less is a glyph's side bearing touching a border.
 _MIN_OVERLAP = 2.0
+
+# How far apart a fix sets two things that collided: enough to read as two.
+_CLEARANCE = 6.0
 
 # How far apart the gaps in a row of like shapes can be before it shows.
 _GAP_TOLERANCE = 2.0
@@ -81,7 +94,7 @@ _SIZE_TOLERANCE = 2.0
 # Text closer than this to an edge of the card it sits on is pressed against
 # it, when it has twice as much room the other way. Equally little room all
 # round is a badge or a pill, and is meant.
-_MIN_ROOM = 6.0
+_MIN_ROOM = 12.0
 
 # A slide's side margin is the distance most of its shapes keep from the left
 # and right edges. Only distances within this share of the slide's width
@@ -91,6 +104,11 @@ _MARGIN_ZONE = 0.2
 # Margins this close are one margin, and a shape further inside it than this
 # is not keeping it.
 _MARGIN_TOLERANCE = 2.0
+
+# How far inside the margin a shape can be and still have been meant to keep
+# it: this much, or a quarter of the margin when that is more. Further in is a
+# decision, a corner logo against a centred composition, not a slip.
+_MARGIN_NEAR = 10.0
 
 # A shape covering this much of the slide is a backdrop, not part of the
 # layout. It is not lined up against anything and it does not make the shapes
@@ -117,6 +135,9 @@ _TITLE_SIZE_TOLERANCE = 1.0
 # quarter of the slide, at this size or more.
 _TITLE_ZONE = 0.25
 _MIN_TITLE_SIZE = 24.0
+
+# How much of a shape's text the reader keeps, for the checks that read it.
+_CONTENT_KEPT = 500
 
 # PowerPoint's default text frame insets, for a frame whose margins could not
 # be read.
@@ -151,14 +172,14 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 # allowed to be unfinished, so those wait for ppt_check_layout.
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
-    "narrow_margin", "misaligned", "uneven_sizes",
+    "narrow_margin", "misaligned", "uneven_sizes", "sample_text",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
-    "empty_placeholder", "inconsistent_titles",
+    "empty_placeholder", "sample_text", "inconsistent_titles",
 )
 
 
@@ -420,13 +441,70 @@ def _like_groups(members, boxes):
     return groups
 
 
+def _text_anchor(shape):
+    """Which sides of its frame a text box's text keeps to, as PowerPoint drew it.
+
+    A pair, across and down: ``"left"``, ``"center"``, ``"right"`` or
+    ``"full"`` when the text fills the frame's width, and ``"top"``,
+    ``"middle"``, ``"bottom"`` or ``"full"`` down it. Either is None when the
+    text sits nowhere in particular, and the pair is None when the text was not
+    measured. Read off where the text was drawn rather than off the paragraph
+    settings, which a reader does not always fetch and which do not say how a
+    frame grew around its text.
+    """
+    words = text_box(shape)
+    if words is None:
+        return None
+    margins = (shape.get("text") or {}).get("margins") or _DEFAULT_MARGINS
+    box = shape_box(shape)
+    inner = (box[0] + margins["left"], box[1] + margins["top"],
+             box[2] - margins["right"], box[3] - margins["bottom"])
+
+    def keeps(low_gap, high_gap, low, middle, high):
+        if low_gap <= _SNUG and high_gap <= _SNUG:
+            return "full"
+        if low_gap <= _SNUG:
+            return low
+        if high_gap <= _SNUG:
+            return high
+        # Measured text can sit a few points off the centre it was set to, so
+        # the two gaps only have to be close for their size.
+        if abs(low_gap - high_gap) <= max(_SNUG, 0.2 * (low_gap + high_gap)):
+            return middle
+        return None
+
+    return (keeps(words[0] - inner[0], inner[2] - words[2], "left", "center", "right"),
+            keeps(words[1] - inner[1], inner[3] - words[3], "top", "middle", "bottom"))
+
+
+def _seen_edges(shape):
+    """The edges of a shape a reader can see, or None for all of them.
+
+    All of a shape that paints. Of a frame that only holds text, the ones its
+    text keeps to: the left of left-set text, the centre of centred text. The
+    rest of the frame cannot be seen, and lining it up means nothing.
+    """
+    if paints_box(shape):
+        return None
+    anchor = _text_anchor(shape)
+    if anchor is None:
+        return None
+    across, down = anchor
+    seen = set()
+    seen |= {"left", "center", "right"} if across in (None, "full") else {across}
+    seen |= {"top", "middle", "bottom"} if down in (None, "full") else {down}
+    return seen
+
+
 def _margins(arranged, boxes, depth, slide_w, slide_h):
     """The margins the slide's shapes keep from its edges, or None.
 
-    The side margin is the distance most of the top level shapes near the left
-    and right edges keep from them, and at least two edges have to agree on
-    it. A slide keeps the same margin on both sides. A shape touching an edge
-    bleeds off it on purpose and keeps no margin, so it does not count.
+    The side margin is a distance top level shapes keep from both the left and
+    the right edge, the one the most of them keep. A shape touching an edge
+    bleeds off it on purpose and keeps no margin, so it does not count. Of a
+    frame holding only text, the sides its text keeps to count, and a wide one
+    set to a side counts on both, the way a title frame is drawn across the
+    slide. A centred one counts on neither: centred text keeps no margin.
 
     A title and a footer rarely keep the same distance from the top and the
     bottom, so the margin there is the one the topmost shape keeps, usually
@@ -434,22 +512,84 @@ def _margins(arranged, boxes, depth, slide_w, slide_h):
     """
     if not slide_w or not slide_h:
         return None
-    sides, tops = [], []
+    lefts, rights, tops = [], [], []
     for shape in arranged:
         if depth[shape["name"]]:
             continue
         box = boxes[shape["name"]]
-        for distance in (box[0], slide_w - box[2]):
+        if paints_box(shape):
+            sides = ("left", "right")
+        else:
+            across = (_text_anchor(shape) or (None, None))[0]
+            if across == "center" or across is None:
+                sides = ()
+            elif across == "full" or _width(box) >= 0.5 * slide_w:
+                sides = ("left", "right")
+            else:
+                sides = (across,)
+        for side in sides:
+            distance = box[0] if side == "left" else slide_w - box[2]
             if _EDGE_TOLERANCE < distance < _MARGIN_ZONE * slide_w:
-                sides.append((shape["name"], distance))
+                (lefts if side == "left" else rights).append(distance)
         if _EDGE_TOLERANCE < box[1] < _MARGIN_ZONE * slide_h:
             tops.append(box[1])
-    groups = _clusters(sides, _MARGIN_TOLERANCE)
-    if not groups or len(groups[0]) < 2:
+    kept = []
+    for value in {round(d, 1) for d in lefts}:
+        on_left = sum(1 for d in lefts if abs(d - value) <= _MARGIN_TOLERANCE)
+        on_right = sum(1 for d in rights if abs(d - value) <= _MARGIN_TOLERANCE)
+        if on_right:
+            # The most shapes keep it; between equals, the narrower.
+            kept.append((on_left + on_right, -value))
+    if not kept:
         return None
-    usual = sorted(distance for _, distance in groups[0])
-    side = round(usual[len(usual) // 2], 1)
+    side = -max(kept)[1]
     return {"horizontal": side, "vertical": round(min([side] + tops), 1)}
+
+
+def _near_margin(distance, margin) -> bool:
+    """Whether a shape this far from the edge was meant to keep the margin."""
+    return margin - max(_MARGIN_NEAR, 0.25 * margin) <= distance < margin - _MARGIN_TOLERANCE
+
+
+# Narrower than this, a frame cannot hold the words of a label.
+_MIN_LABEL_WIDTH = 60.0
+
+# A label sits this close above or below the dot or icon it labels.
+_LABEL_GAP = 30.0
+
+
+def _centred_text(shape) -> bool:
+    """Whether a shape is a frame of centred text, a label under an icon or a dot."""
+    return not paints_box(shape) and (_text_anchor(shape) or (None, None))[0] == "center"
+
+
+def _centred_shorten(shape, low, high):
+    """The fix for centred text too near the edge for a narrower frame to help."""
+    box = shape_box(shape)
+    centre = (box[0] + box[2]) / 2
+    room = max(0.0, 2 * min(centre - low, high - centre))
+    return (f"Shorten the text of '{shape['name']}': centred where it is, at "
+            f"{_pt(centre)}, it has {_pt(room)} across before the margin. Moving "
+            "it would take it off what it labels; to make room, move that in "
+            "from the edge as well.")
+
+
+def _centred_fit(shape, low, high):
+    """The fix that keeps centred text between ``low`` and ``high``, or None.
+
+    Centred text labels whatever it is centred on, so moving it would take it
+    off its mark. Narrowing its frame around the same centre makes the text
+    wrap inside the limits and leaves it where it was.
+    """
+    box = shape_box(shape)
+    centre = (box[0] + box[2]) / 2
+    half = min(centre - low, high - centre)
+    if 2 * half < _MIN_LABEL_WIDTH:
+        return None
+    return (f"Narrow '{shape['name']}' to {_pt(2 * half)} around its centre, so "
+            f"its text wraps inside the margin and stays centred where it is "
+            f"(ppt_update_shape left={_num(centre - half)} width={_num(2 * half)}), "
+            "or shorten the text.")
 
 
 def _layout(shapes, slide_w, slide_h):
@@ -460,6 +600,10 @@ def _layout(shapes, slide_w, slide_h):
     ``groups`` are the top level ones, which are spaced and kept to the
     margins. ``rows`` and ``columns`` map each shape that paints to the like
     shapes beside it on its own level, which are kept one size.
+
+    Only shapes that paint make rows. A text frame's size follows its text,
+    so text set beside a row of icons is spaced by the icons it labels, and
+    whether it lines up with them is the alignment check's question.
     """
     arranged = _arranged(shapes, slide_w, slide_h)
     boxes = {s["name"]: shape_box(s) for s in arranged}
@@ -471,7 +615,7 @@ def _layout(shapes, slide_w, slide_h):
             names = [s["name"] for s in group]
             for name in names:
                 (rows if direction == "horizontal" else columns)[name] = names
-    top = [s for s in arranged if depth[s["name"]] == 0]
+    top = [s for s in arranged if depth[s["name"]] == 0 and paints_box(s)]
     return {
         "arranged": arranged, "boxes": boxes, "depth": depth,
         "groups": _like_groups(top, boxes), "rows": rows, "columns": columns,
@@ -645,8 +789,16 @@ def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
                 calls.append(f"{field}={_num(shape[field] + sign * amount)}")
                 if keep:
                     kept.append(_pt(keep))
+        keep = margins.get("horizontal") or 0.0
+        centred = None
+        if _centred_text(shape) and not {"top", "bottom"} & set(past):
+            # Moved, centred text would leave what it is centred on.
+            centred = _centred_fit(shape, keep, slide_w - keep) or _centred_shorten(
+                shape, keep, slide_w - keep)
         if too_big:
             fix = f"'{name}' is {' and '.join(too_big)} than the slide: make it smaller."
+        elif centred:
+            fix = centred
         else:
             keeping = (f", to keep the {' and '.join(kept)} margin"
                        f"{'s' if len(kept) > 1 else ''} the rest of the slide keeps"
@@ -788,24 +940,25 @@ def _overlap_finding(slide_index, a, a_text, b, b_ink, width, height, layout):
 
     # What b puts on the slide is its text when it does not paint its box.
     target = f"'{b_name}'" if paints_box(b) else f"the text of '{b_name}'"
-    # The cheaper way apart: along whichever axis they share less of.
-    if height <= width:
-        clear = height + 4.0
-        if (b_ink[1] + b_ink[3]) >= (a_text[1] + a_text[3]):
-            fix = (f"Move '{b_name}' down by {_pt(clear)} (ppt_update_shape "
-                   f"dtop={_num(clear)}), or move '{a_name}' up or shorten "
-                   "its text by that much.")
-        else:
-            fix = (f"Move '{b_name}' up by {_pt(clear)} (ppt_update_shape "
-                   f"dtop={_num(-clear)}), or move '{a_name}' down by that much.")
+    # The cheaper way apart: along whichever axis they share less of, moving
+    # the smaller of the two, the caption rather than the table it captions.
+    a_box, b_box = shape_box(a), shape_box(b)
+    if _width(a_box) * _height(a_box) <= _width(b_box) * _height(b_box):
+        mover, mine, theirs = a_name, a_text, b_ink
     else:
-        clear = width + 4.0
-        if (b_ink[0] + b_ink[2]) >= (a_text[0] + a_text[2]):
-            fix = (f"Move '{b_name}' right by {_pt(clear)} (ppt_update_shape "
-                   f"dleft={_num(clear)}), or make '{a_name}' narrower by that much.")
-        else:
-            fix = (f"Move '{b_name}' left by {_pt(clear)} (ppt_update_shape "
-                   f"dleft={_num(-clear)}), or move '{a_name}' right by that much.")
+        mover, mine, theirs = b_name, b_ink, a_text
+    if height <= width:
+        clear = height + _CLEARANCE
+        sign = 1 if mine[1] + mine[3] >= theirs[1] + theirs[3] else -1
+        way, call = ("down" if sign > 0 else "up"), f"dtop={_num(sign * clear)}"
+    else:
+        clear = width + _CLEARANCE
+        sign = 1 if mine[0] + mine[2] >= theirs[0] + theirs[2] else -1
+        way, call = ("right" if sign > 0 else "left"), f"dleft={_num(sign * clear)}"
+    other = b_name if mover == a_name else a_name
+    fix = (f"Move '{mover}' {way} by {_pt(clear)} (ppt_update_shape {call}), "
+           f"which leaves {_pt(_CLEARANCE)} between it and '{other}', or "
+           f"shorten the text of '{a_name}'.")
     return _finding(
         slide_index, "overlap", [a_name, b_name],
         f"The text of '{a_name}' runs into {target}: they share an area "
@@ -871,14 +1024,14 @@ def _low_contrast(slide_index, shapes, background_hex):
             needed = _CONTRAST_LARGE if large else _CONTRAST_TEXT
             ratio = _contrast_ratio(colour, backdrop)
             if ratio < needed and (worst is None or ratio / needed < worst[0] / worst[1]):
-                worst = (ratio, needed, colour)
+                worst = (ratio, needed, colour, size)
         if worst is None:
             continue
-        ratio, needed, colour = worst
+        ratio, needed, colour, size = worst
         name = shape["name"]
         # The colour the slide's other text already uses keeps it looking like
         # one slide; black or white is the answer when none of them is enough.
-        ours = [c for c in _text_colours(shapes, shape)
+        ours = [c for c in _text_colours(shapes, shape, size)
                 if _contrast_ratio(c, backdrop) >= needed]
         if ours:
             suggestion, source = ours[0], ", the colour of the other text on the slide"
@@ -898,17 +1051,25 @@ def _low_contrast(slide_index, shapes, background_hex):
     return findings
 
 
-def _text_colours(shapes, exclude):
-    """The colours the slide's other text is set in, the most used first."""
+def _text_colours(shapes, exclude, size=None):
+    """The colours the slide's other text is set in.
+
+    The colour of text about ``size`` first, body text for body text rather
+    than the colour of the headings, and then the most used.
+    """
     counts = {}
     for shape in shapes:
         if shape is exclude or not shape.get("visible", True):
             continue
         for run in (shape.get("text") or {}).get("runs") or []:
             colour = (run.get("color_hex") or "").upper()
-            if colour:
-                counts[colour] = counts.get(colour, 0) + 1
-    return sorted(counts, key=lambda c: -counts[c])
+            if not colour:
+                continue
+            alike = bool(size) and abs((run.get("size") or 0.0) - size) <= 2.0
+            seen = counts.setdefault(colour, [0, 0])
+            seen[0] += alike
+            seen[1] += 1
+    return sorted(counts, key=lambda c: (-counts[c][0], -counts[c][1]))
 
 
 # Edge names per axis, in the order they are preferred when two tie.
@@ -932,6 +1093,17 @@ def _related(a_box, b_box, axis) -> bool:
     return shared >= _SHARED_SPAN * min(_height(a_box), _height(b_box))
 
 
+def _within(edge, gap, loose=True) -> bool:
+    """Whether two lines this far apart are one line.
+
+    Centres get the looser allowance only between shapes of different sizes,
+    whose edges cannot meet anyway. Between two of one size, a centre off is
+    every edge off by as much.
+    """
+    centre = loose and edge in ("center", "middle")
+    return gap <= (_ALIGNED_CENTRE if centre else _ALIGNED)
+
+
 def _misaligned(slide_index, layout, only=None):
     """Edges a few points apart that were meant to be one edge.
 
@@ -947,76 +1119,175 @@ def _misaligned(slide_index, layout, only=None):
     Only shapes on the same level are compared: cards with cards, and the text
     on one card with the text on the next. Text is placed on its card, inset
     from its edges, rather than lined up with it or with the cards beside it.
+    Of a text frame only the edges its text keeps to are compared: the centre
+    of a centred name, not the sides of a frame no one can see.
+
+    Levels are judged from the cards down. The icon and text on a card that
+    slipped slipped with it, so they are judged where the card's fix will put
+    them, and the card's fix moves them along.
     """
     arranged, boxes, depth = layout["arranged"], layout["boxes"], layout["depth"]
+    seen = {s["name"]: _seen_edges(s) for s in arranged}
+    placed = dict(boxes)
+    slips = []
+    for level in sorted(set(depth.values())):
+        members = [s for s in arranged if depth[s["name"]] == level]
+        found = []
+        for axis in ("x", "y"):
+            found += _slips_along(axis, members, placed, seen)
+        for slip in found:
+            mover = slip["mover"]
+            slip["carried"] = [
+                s for s in arranged
+                if depth[s["name"]] > level and paints_box(mover)
+                and _belongs_to(s, mover, boxes)
+            ]
+            for shape in slip["carried"]:
+                placed[shape["name"]] = _moved(placed[shape["name"]], slip["axis"], -slip["delta"])
+        slips += found
+
     findings = []
-    for axis in ("x", "y"):
-        aligned = {s["name"]: 0 for s in arranged}
-        near = []
-        for i, a in enumerate(arranged):
-            for b in arranged[i + 1:]:
-                if depth[a["name"]] != depth[b["name"]]:
-                    continue
-                a_box, b_box = boxes[a["name"]], boxes[b["name"]]
-                if not _related(a_box, b_box, axis):
-                    continue
-                a_edges, b_edges = _edges(a_box, axis), _edges(b_box, axis)
-                gaps = {edge: abs(a_edges[edge] - b_edges[edge]) for edge in a_edges}
-                closest = min(gaps, key=gaps.get)
-                if gaps[closest] <= _ALIGNED:
-                    aligned[a["name"]] += 1
-                    aligned[b["name"]] += 1
-                elif gaps[closest] <= _NEAR_MISS:
-                    near.append((a, b, closest))
-
-        grouped = {}
-        for a, b, edge in near:
-            # The one that stays is lined up with more shapes, or was there
-            # first. Stacking order is creation order unless something moved
-            # a shape in it, which is as close as a slide comes to a history.
-            if (aligned[a["name"]], -a.get("z", 0)) > (aligned[b["name"]], -b.get("z", 0)):
-                anchor, mover = a, b
-            else:
-                anchor, mover = b, a
-            grouped.setdefault((mover["name"], edge), (mover, edge, []))[2].append(anchor)
-
-        for mover, edge, anchors in grouped.values():
-            finding = _misaligned_finding(slide_index, axis, mover, edge, anchors, boxes)
-            if only is not None and not set(finding["shapes"]) & set(only):
-                continue
+    for slip in slips:
+        finding = _misaligned_finding(slide_index, slip, placed)
+        if only is None or set(finding["shapes"]) & set(only):
             findings.append(finding)
     return findings
 
 
-def _misaligned_finding(slide_index, axis, mover, edge, anchors, boxes):
-    name = mover["name"]
+def _off_centre_labels(slide_index, layout):
+    """Centred labels set well off the centre of the mark they label.
+
+    A label under a dot or an icon is centred on it. One a few points off is
+    an ordinary slip and the alignment check reports it; this finds the label
+    whose frame was drawn wider than the rest from the same left offset, so
+    its text is centred a long way to one side, up to a quarter of its own
+    width, beyond which it is not that mark's label at all.
+    """
+    boxes, depth = layout["boxes"], layout["depth"]
+    findings = []
+    for label in layout["arranged"]:
+        words = text_box(label) if _centred_text(label) else None
+        if words is None:
+            continue
+        mark, nearest = None, None
+        for shape in layout["arranged"]:
+            if shape is label or not paints_box(shape) or depth[shape["name"]] != depth[label["name"]]:
+                continue
+            box = boxes[shape["name"]]
+            gap = max(box[1] - words[3], words[1] - box[3])
+            if not _related(words, box, "x") or not -_EDGE_TOLERANCE <= gap <= _LABEL_GAP:
+                continue
+            if nearest is None or gap < nearest:
+                mark, nearest = shape, gap
+        if mark is None:
+            continue
+        frame, mark_box = boxes[label["name"]], boxes[mark["name"]]
+        off = (frame[0] + frame[2]) / 2 - (mark_box[0] + mark_box[2]) / 2
+        if not _NEAR_MISS < abs(off) <= 0.25 * _width(words):
+            continue
+        name, left = label["name"], round(frame[0] - off, 2)
+        findings.append(_finding(
+            slide_index, "misaligned", [name, mark["name"]],
+            f"The center of '{name}' is {_pt(abs(off))} "
+            f"{'right' if off > 0 else 'left'} of the center of '{mark['name']}', "
+            "the mark it labels.",
+            f"Set left of '{name}' to {_pt(left)} so it is centred on "
+            f"'{mark['name']}' (ppt_update_shape left={left:g}).",
+            severity="warning", edge="center", off_by_pt=round(abs(off), 2),
+        ))
+    return findings
+
+
+def _moved(box, axis, by):
+    """A box moved along one axis."""
+    if axis == "x":
+        return (box[0] + by, box[1], box[2] + by, box[3])
+    return (box[0], box[1] + by, box[2], box[3] + by)
+
+
+def _slips_along(axis, members, boxes, seen):
+    """The slips among one level's shapes along one axis."""
+    aligned = {s["name"]: 0 for s in members}
+    near = []
+    for i, a in enumerate(members):
+        for b in members[i + 1:]:
+            a_box, b_box = boxes[a["name"]], boxes[b["name"]]
+            if not _related(a_box, b_box, axis):
+                continue
+            a_edges, b_edges = _edges(a_box, axis), _edges(b_box, axis)
+            gaps = {
+                edge: abs(a_edges[edge] - b_edges[edge]) for edge in a_edges
+                if all(seen[s["name"]] is None or edge in seen[s["name"]] for s in (a, b))
+            }
+            if not gaps:
+                continue
+            span = _width if axis == "x" else _height
+            loose = abs(span(a_box) - span(b_box)) > 2 * _ALIGNED
+            if any(_within(edge, gap, loose) for edge, gap in gaps.items()):
+                aligned[a["name"]] += 1
+                aligned[b["name"]] += 1
+                continue
+            closest = min(gaps, key=gaps.get)
+            if gaps[closest] <= _NEAR_MISS:
+                near.append((a, b, closest))
+
+    grouped = {}
+    for a, b, edge in near:
+        # The one that stays is lined up with more shapes, or was there
+        # first. Stacking order is creation order unless something moved a
+        # shape in it, which is as close as a slide comes to a history.
+        if (aligned[a["name"]], -a.get("z", 0)) > (aligned[b["name"]], -b.get("z", 0)):
+            anchor, mover = a, b
+        else:
+            anchor, mover = b, a
+        grouped.setdefault((mover["name"], edge), (mover, edge, []))[2].append(anchor)
+    return [_slip(axis, mover, edge, anchors, boxes) for mover, edge, anchors in grouped.values()]
+
+
+def _slip(axis, mover, edge, anchors, boxes):
+    """How far ``mover``'s edge is from the line most of ``anchors`` share."""
     values = [_edges(boxes[a["name"]], axis)[edge] for a in anchors]
     # Where most of the others are; between equals, the nearest.
-    mine = _edges(boxes[name], axis)[edge]
+    mine = _edges(boxes[mover["name"]], axis)[edge]
     target = max(
         {round(v, 2) for v in values},
-        key=lambda v: (sum(1 for x in values if abs(x - v) <= _ALIGNED), -abs(v - mine)),
+        key=lambda v: (sum(1 for x in values if _within(edge, abs(x - v))), -abs(v - mine)),
     )
     # Only the shapes on that line are named. One that is off it as well is
     # off against them too, and has its own finding.
-    anchors = [a for a, v in zip(anchors, values, strict=True) if abs(v - target) <= _ALIGNED]
-    delta = mine - target
-    # Moving the whole shape by the difference puts that edge on the target,
-    # whichever edge it is.
+    on_line = [a for a, v in zip(anchors, values, strict=True) if _within(edge, abs(v - target))]
+    return {"axis": axis, "mover": mover, "edge": edge, "anchors": on_line,
+            "delta": mine - target}
+
+
+def _misaligned_finding(slide_index, slip, placed):
+    mover, axis, edge, delta = slip["mover"], slip["axis"], slip["edge"], slip["delta"]
+    carried = slip.get("carried") or []
+    name = mover["name"]
+    field = "left" if axis == "x" else "top"
+    # Where it goes is worked out from where it will be once the card it sits
+    # on has been put back, which is where it was judged.
+    value = round(placed[name][0 if axis == "x" else 1] - delta, 2)
     if axis == "x":
-        field, value = "left", round(mover["left"] - delta, 2)
-        direction = "right of" if delta > 0 else "left of"
+        direction, way = ("right of", "left") if delta > 0 else ("left of", "right")
     else:
-        field, value = "top", round(mover["top"] - delta, 2)
-        direction = "below" if delta > 0 else "above"
-    others = ", ".join(f"'{a['name']}'" for a in anchors)
+        direction, way = ("below", "up") if delta > 0 else ("above", "down")
+    others = ", ".join(f"'{a['name']}'" for a in slip["anchors"])
+    if carried:
+        names = [name] + [c["name"] for c in carried]
+        listed = ", ".join(f"'{c['name']}'" for c in carried)
+        fix = (f"Move '{name}' {way} by {_pt(abs(delta))} together with the shapes "
+               f"on it, {listed} (ppt_update_shape shape_names={names} "
+               f"d{field}={_num(-delta)}).")
+    else:
+        names = [name]
+        fix = (f"Set {field} of '{name}' to {_pt(value)} (ppt_update_shape "
+               f"{field}={value:g}), or ppt_align_shapes with align_to='{edge}'.")
     return _finding(
-        slide_index, "misaligned", [name] + [a["name"] for a in anchors],
+        slide_index, "misaligned", names[:1] + [a["name"] for a in slip["anchors"]] + names[1:],
         f"The {edge} of '{name}' is {_pt(abs(delta))} {direction} the "
         f"{edge} of {others}, close enough to look like a slip.",
-        f"Set {field} of '{name}' to {_pt(value)} (ppt_update_shape "
-        f"{field}={value:g}), or ppt_align_shapes with align_to='{edge}'.",
-        severity="warning", edge=edge, off_by_pt=round(abs(delta), 2),
+        fix, severity="warning", edge=edge, off_by_pt=round(abs(delta), 2),
     )
 
 
@@ -1191,7 +1462,8 @@ def _narrow_margins(slide_index, layout, slide_w):
     one past it is off the slide, which is its own finding. What is left is a
     shape that stops short of the edge but inside the margin the other shapes
     keep: a row one card too far to the right, or a box pushed back onto the
-    slide only just far enough.
+    slide only just far enough. Only a near miss counts. A logo in the corner
+    of a slide whose text is centred well in from the sides is placed there.
     """
     margins = layout["margins"]
     if not margins:
@@ -1202,11 +1474,15 @@ def _narrow_margins(slide_index, layout, slide_w):
             if direction == "horizontal" for s in members}
     findings = []
     for shape in layout["arranged"]:
-        ink = ink_box(shape) if not layout["depth"][shape["name"]] else None
+        # Centred text is placed by what it labels, not by the margin. Off the
+        # slide altogether, it is reported as such.
+        if layout["depth"][shape["name"]] or _centred_text(shape):
+            continue
+        ink = ink_box(shape)
         if ink is None:
             continue
         for edge, distance in (("left", ink[0]), ("right", slide_w - ink[2])):
-            if distance <= _EDGE_TOLERANCE or distance >= side - _MARGIN_TOLERANCE:
+            if distance <= _EDGE_TOLERANCE or not _near_margin(distance, side):
                 continue
             name, box = shape["name"], boxes[shape["name"]]
             row = rows.get(name)
@@ -1227,6 +1503,51 @@ def _narrow_margins(slide_index, layout, slide_w):
                 distance_pt=round(distance, 1), margin_pt=side,
             ))
             break
+    return findings
+
+
+# Text a template or a draft leaves for someone to replace. The words in any
+# case. Stand-in figures only in capitals and only with a currency sign, a
+# decimal point or a unit, so that neither a word nor a Roman numeral is one.
+_SAMPLE_WORDS = re.compile(
+    r"lorem\s+ipsum|click\s+to\s+(?:add|edit)\b"
+    r"|\b(?:your|insert)\s+(?:text|title|name|company|logo|content|subtitle|tagline"
+    r"|caption|image|photo|picture)\b"
+    r"|(?:^|\n)\s*(?:add\s+)?(?:text|title|subtitle|caption|content)\s+(?:goes\s+)?here\b"
+    r"|\[[^\]\n]{0,40}\b(?:insert|your|name|date|title|company|client|logo|image"
+    r"|placeholder|amount|number)\b[^\]\n]{0,40}\]",
+    re.IGNORECASE,
+)
+_SAMPLE_FIGURES = re.compile(
+    r"(?<![A-Za-z0-9])(?:[$\u20ac\u00a3]XX+(?:[.,]X+)*[%KMB]?|XX+(?:[.,]X+)+[%KMB]?|XX+[%KMB])"
+    r"(?![A-Za-z0-9])"
+)
+
+
+def _sample_text(slide_index, shapes):
+    """Text a template or a draft left behind to be replaced.
+
+    Lorem ipsum, "Your title here", "[Company name]", "XX%". A model fills a
+    slide in passes and loses track of one, and on a finished slide it reads
+    as unfinished work.
+    """
+    findings = []
+    for shape in shapes:
+        content = (shape.get("text") or {}).get("content") or ""
+        if not content or not shape.get("visible", True):
+            continue
+        found = _SAMPLE_WORDS.search(content) or _SAMPLE_FIGURES.search(content)
+        if not found:
+            continue
+        name = shape["name"]
+        findings.append(_finding(
+            slide_index, "sample_text", [name],
+            f"'{name}' still has stand-in text: \"{found.group(0)}\".",
+            f"Replace it with the real content (ppt_find_replace_text, or "
+            f"ppt_set_text for all of '{name}'), or delete the shape if it is "
+            "not needed.",
+            severity="warning", sample=found.group(0),
+        ))
     return findings
 
 
@@ -1267,7 +1588,9 @@ def slide_findings(slide, slide_w, slide_h, only=None):
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
+        + _off_centre_labels(index, layout)
         + _uneven_sizes(index, layout)
+        + _sample_text(index, shapes)
     )
     if only is not None:
         return _sorted([
@@ -1309,6 +1632,15 @@ def find_title(slide, slide_h):
     for shape in slide["shapes"]:
         text = shape.get("text")
         if shape.get("placeholder_type") in _TITLE_PLACEHOLDERS and text and text.get("chars"):
+            # The title slide's own title, and a section header's, set lower,
+            # are meant to differ from the rest. Where the text is drawn says
+            # how low: a title placeholder's frame is often far taller than
+            # the line in it.
+            words = text_box(shape) or shape_box(shape)
+            if shape.get("placeholder_type") == ppPlaceholderCenterTitle or (
+                slide_h and words[1] > _TITLE_ZONE * slide_h
+            ):
+                return None
             return shape
     if not slide_h:
         return None
@@ -1347,57 +1679,173 @@ def _slides(numbers):
 
 
 def deck_findings(slides, slide_h):
-    """Titles that differ between slides that share a layout.
+    """Titles that differ between slides.
 
-    Flipping from one slide to the next, a title that is a size larger, or a
-    few points lower, is the thing that jumps. Slides are compared within their
-    layout, so a section header is not held to a content slide's title.
+    Flipping from one slide to the next, a title that is a size larger, a few
+    points lower, or set in another weight is the thing that jumps, whatever
+    layout each slide is on: a slide on the layout's own title placeholder
+    among slides with a title box of their own jumps just the same. Only
+    titles at the top of a slide are compared, so a cover's or a section
+    header's title, set lower and meant to differ, is not held to the rest.
+    Colours are compared only between titles on the same backdrop, since a
+    light title on a dark slide is meant.
     """
-    by_layout = {}
+    by_index = {slide["slide_index"]: slide for slide in slides}
+    titled = []
     for slide in slides:
         title = find_title(slide, slide_h)
-        if title is None:
-            continue
-        by_layout.setdefault(slide.get("layout"), []).append((slide["slide_index"], title))
+        if title is not None:
+            titled.append((slide["slide_index"], title))
+    if len(titled) < _MIN_TITLED_SLIDES:
+        return []
 
     findings = []
-    for layout, titled in by_layout.items():
-        if len(titled) < _MIN_TITLED_SLIDES:
+    for label, read, tolerance, field in (
+        ("size", _largest_size, _TITLE_SIZE_TOLERANCE, None),
+        ("left edge", lambda s: _title_edge(s, "left"), _NEAR_MISS, "left"),
+        ("top edge", lambda s: _title_edge(s, "top"), _NEAR_MISS, "top"),
+    ):
+        values = [(index, read(shape)) for index, shape in titled if read(shape) is not None]
+        groups = _clusters(values, tolerance)
+        if len(groups) < 2:
             continue
-        for label, read, tolerance, field in (
-            ("size", _largest_size, _TITLE_SIZE_TOLERANCE, None),
-            ("left edge", lambda s: s["left"], _NEAR_MISS, "left"),
-            ("top edge", lambda s: s["top"], _NEAR_MISS, "top"),
-        ):
-            values = [(index, read(shape)) for index, shape in titled if read(shape) is not None]
-            groups = _clusters(values, tolerance)
-            if len(groups) < 2:
-                continue
-            usual = groups[0]
-            usual_value = sorted(v for _, v in usual)[len(usual) // 2]
-            unit = "pt"
-            described = "; ".join(
-                f"{round(sorted(v for _, v in g)[len(g) // 2], 1):g} {unit} on "
-                f"{_slides(i for i, _ in g)}"
-                for g in groups
-            )
-            odd = [i for g in groups[1:] for i, _ in g]
-            names = [shape["name"] for index, shape in titled if index in odd]
-            if field is None:
-                fix = (f"Set the titles on {_slides(odd)} to "
-                       f"{round(usual_value, 1):g} pt (ppt_format_text "
-                       f"font_size={round(usual_value, 1):g}).")
-            else:
-                fix = (f"Set {field} of the titles on {_slides(odd)} to "
-                       f"{round(usual_value, 1):g} pt (ppt_update_shape "
-                       f"{field}={round(usual_value, 2):g}).")
-            findings.append(_finding(
-                None, "inconsistent_titles", names,
-                f"Slide titles{f' on the {layout} layout' if layout else ''} "
-                f"differ in {label}: {described}.",
-                fix, severity="warning", slides=sorted(odd),
-            ))
+        usual = groups[0]
+        usual_value = sorted(v for _, v in usual)[len(usual) // 2]
+        described = "; ".join(
+            f"{round(sorted(v for _, v in g)[len(g) // 2], 1):g} pt on "
+            f"{_slides(i for i, _ in g)}"
+            for g in groups
+        )
+        odd = [i for g in groups[1:] for i, _ in g]
+        names = [shape["name"] for index, shape in titled if index in odd]
+        if field is None:
+            fix = (f"Set the titles on {_slides(odd)} to "
+                   f"{round(usual_value, 1):g} pt (ppt_format_text "
+                   f"font_size={round(usual_value, 1):g}).")
+        else:
+            moves = _title_moves(field, usual_value, odd, titled, by_index)
+            fix = (f"Set {field} of the titles on {_slides(odd)} to "
+                   f"{round(usual_value, 1):g} pt: {moves}.")
+        findings.append(_finding(
+            None, "inconsistent_titles", names,
+            f"Slide titles differ in {label}: {described}.",
+            fix, severity="warning", slides=sorted(odd),
+        ))
+
+    findings += _title_differences(
+        "weight", [(index, title, _title_weight(title)) for index, title in titled],
+        lambda value: f"in {value}" if value == "bold" else "in regular weight",
+        lambda value: f"bold={'true' if value == 'bold' else 'false'}",
+    )
+    # A layout's title placeholder is set in the theme's heading font, and a
+    # title box of one's own in the body font, so a deck mixing the two has
+    # titles in two typefaces.
+    findings += _title_differences(
+        "font", [(index, title, _title_font(title)) for index, title in titled],
+        lambda value: f"in {value}", lambda value: f"font_name='{value}'",
+    )
+    by_backdrop = {}
+    for index, title in titled:
+        slide = by_index[index]
+        backdrop = _backdrop_colour(title, slide["shapes"], slide.get("background_hex"))
+        if backdrop:
+            by_backdrop.setdefault(backdrop, []).append((index, title, _title_colour(title)))
+    for entries in by_backdrop.values():
+        findings += _title_differences(
+            "colour", entries, lambda value: f"to {value}",
+            lambda value: f"color='{value}'",
+        )
     return findings
+
+
+def _title_edge(title, field):
+    """Where a title's text starts, which is what jumps from slide to slide.
+
+    The frame can say otherwise: a layout's title placeholder is often far
+    taller than its line, with the line anchored at its middle or bottom.
+    """
+    box = text_box(title) or shape_box(title)
+    return box[0] if field == "left" else box[1]
+
+
+def _title_weight(title):
+    flags = [bool(run.get("bold")) for run in (title.get("text") or {}).get("runs") or []
+             if run.get("bold") is not None]
+    if not flags:
+        return None
+    return "bold" if 2 * sum(flags) >= len(flags) else "regular"
+
+
+def _title_font(title):
+    fonts = [run["font"] for run in (title.get("text") or {}).get("runs") or []
+             if run.get("font")]
+    return max(set(fonts), key=fonts.count) if fonts else None
+
+
+def _title_colour(title):
+    colours = [run["color_hex"].upper() for run in (title.get("text") or {}).get("runs") or []
+               if run.get("color_hex")]
+    return max(set(colours), key=colours.count) if colours else None
+
+
+def _title_differences(label, entries, as_words, as_call):
+    """Titles that differ in a setting with no in-between, a weight or a colour."""
+    groups = {}
+    for index, title, value in entries:
+        if value is not None:
+            groups.setdefault(value, []).append((index, title))
+    if len(groups) < 2 or sum(len(g) for g in groups.values()) < _MIN_TITLED_SLIDES:
+        return []
+    ordered = sorted(groups.items(), key=lambda item: (-len(item[1]), min(i for i, _ in item[1])))
+    usual = ordered[0][0]
+    odd = sorted(i for _, members in ordered[1:] for i, _ in members)
+    names = [t["name"] for _, members in ordered[1:] for _, t in members]
+    described = "; ".join(f"{value} on {_slides(i for i, _ in members)}" for value, members in ordered)
+    return [_finding(
+        None, "inconsistent_titles", names,
+        f"Slide titles differ in {label}: {described}.",
+        f"Set the titles on {_slides(odd)} {as_words(usual)} (ppt_format_text "
+        f"{as_call(usual)}).",
+        severity="warning", slides=odd,
+    )]
+
+
+def _title_moves(field, value, odd, titled, by_index):
+    """The calls that put each odd title on ``value``, with what lines up with it.
+
+    A slide's body is often set to its title's left edge. Moving the title
+    alone would leave the body out of line with it, so whatever shares the
+    edge moves with the title.
+    """
+    parts = []
+    for index, title in titled:
+        if index not in odd:
+            continue
+        by = value - _title_edge(title, field)
+        if field == "top":
+            # A title placeholder in the right place with its line anchored at
+            # the bottom of a tall frame: anchoring it at the top puts the text
+            # where the others are, without moving the frame off the slide.
+            down = (_text_anchor(title) or (None, None))[1]
+            margins = (title.get("text") or {}).get("margins") or _DEFAULT_MARGINS
+            if down not in ("top", "full") and abs(title["top"] + margins["top"] - value) <= _NEAR_MISS:
+                parts.append(f"on slide {index}, ppt_set_textframe vertical_anchor='top' "
+                             f"on '{title['name']}', which sets its text at the top of "
+                             "its frame, where the other titles' text is")
+                continue
+        along = [shape["name"] for shape in by_index[index]["shapes"]
+                 if shape is not title and abs(shape[field] - title[field]) <= _ALIGNED]
+        if along:
+            names = [title["name"]] + along
+            listed = ", ".join(f"'{n}'" for n in along)
+            parts.append(
+                f"on slide {index}, ppt_update_shape shape_names={names} "
+                f"d{field}={_num(by)}, which moves {listed}, lined up with the "
+                "title, along with it")
+        else:
+            parts.append(f"on slide {index}, ppt_update_shape {field}="
+                         f"{_num(title[field] + by)} on '{title['name']}'")
+    return "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1485,6 +1933,7 @@ def _text_facts(shape, full):
         content = ""
     facts = {
         "chars": len(content.strip()),
+        "content": content[:_CONTENT_KEPT],
         "left": None, "top": None, "width": None, "height": None,
         "alignment": None, "runs": [],
         "margins": None, "word_wrap": None, "autofit": None,
@@ -1525,12 +1974,12 @@ def _text_facts(shape, full):
                 continue
             font = run.Font
             styles.add((int_to_hex(font.Color.RGB), round(font.Size, 1),
-                        font.Bold == msoTrue))
+                        font.Bold == msoTrue, getattr(font, "Name", None) or None))
         except Exception:
             continue
     facts["runs"] = [
-        {"color_hex": colour, "size": size, "bold": bold}
-        for colour, size, bold in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
+        {"color_hex": colour, "size": size, "bold": bold, "font": name}
+        for colour, size, bold, name in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
     return facts
 
@@ -1802,6 +2251,8 @@ def register_tools(mcp):
         - uneven_sizes: like shapes in a row (or column) that are not one
           height (or width)
         - empty_placeholder: a placeholder left without text
+        - sample_text: text a template or a draft left to be replaced, such
+          as lorem ipsum, "Your title here", "[Company name]" or "XX%"
         - inconsistent_titles (whole deck only): titles that differ in size or
           position between slides with the same layout
 

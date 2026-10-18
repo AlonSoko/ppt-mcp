@@ -127,9 +127,10 @@ def _run_styles(text_range) -> list:
     colour = _value(font.get(k.font_color))
     size = _value(font.get(k.font_size))
     bold = _value(font.get(k.bold))
+    name = _value(font.get(k.font_name))
     if isinstance(colour, list) and isinstance(size, (int, float)) and bold is not None:
         return [{"color_hex": rgb_list_to_hex(colour), "size": round(size, 1),
-                 "bold": bold is True}]
+                 "bold": bold is True, "font": name if isinstance(name, str) else None}]
 
     try:
         chars = text_range.characters
@@ -156,8 +157,10 @@ def _run_styles(text_range) -> list:
             round(size, 1) if isinstance(size, (int, float)) else None,
             _value(bold) is True,
         ))
+    # The typeface would cost one more event per column; mixed text leaves it
+    # unknown rather than guessed.
     return [
-        {"color_hex": colour, "size": size, "bold": bold}
+        {"color_hex": colour, "size": size, "bold": bold, "font": None}
         for colour, size, bold in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
 
@@ -169,9 +172,11 @@ def _text_facts(shape, full):
     shape that is read only for where its text sits costs one event. In full,
     the frame's record and the character columns are added.
     """
+    from ppt_com.layout_check import _CONTENT_KEPT
+
     frame = shape.text_frame
     facts = {
-        "chars": 0,
+        "chars": 0, "content": "",
         "left": None, "top": None, "width": None, "height": None,
         "alignment": None, "runs": [],
         "margins": None, "word_wrap": None, "autofit": None,
@@ -181,6 +186,7 @@ def _text_facts(shape, full):
     words = _record(tr)
     content = _value(words.get(k.content)) or ""
     facts["chars"] = len(content.strip()) if isinstance(content, str) else 0
+    facts["content"] = content[:_CONTENT_KEPT] if isinstance(content, str) else ""
     if full:
         facts.update(_frame_state(_record(frame)))
     if not facts["chars"]:

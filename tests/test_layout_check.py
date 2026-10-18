@@ -6,7 +6,9 @@ answers rather than the walk that gathers them. The Windows reader is then
 run over fake COM objects, since it is the half CI exercises.
 """
 
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, "src")
@@ -16,7 +18,7 @@ import pytest
 from ppt_com import layout_check
 from ppt_com.constants import (
     msoAutoShape, msoFalse, msoFillSolid, msoPicture, msoPlaceholder,
-    msoTextBox, msoTrue,
+    msoTable, msoTextBox, msoTrue,
 )
 from ppt_com.layout_check import (
     deck_findings, find_title, ink_box, paints_box, report_layout,
@@ -513,9 +515,15 @@ class TestNarrowMargins:
         assert "Set left of 'card1' to 340 pt and of 'card2' to 640 pt" in finding["fix"]
 
     def test_a_shape_on_its_own_moves_in(self):
-        found = check(*titled_row(), card("box", 820, 470, 120, 50, z=9))
+        found = check(*titled_row(), card("box", 808, 470, 120, 50, z=9))
         [finding] = found
-        assert "Move 'box' left by 20 pt (ppt_update_shape left=800)" in finding["fix"]
+        assert finding["distance_pt"] == 32.0
+        assert "Move 'box' left by 8 pt (ppt_update_shape left=800)" in finding["fix"]
+
+    def test_a_corner_element_well_inside_the_margin_is_placed_there(self):
+        # A logo or a page number often keeps a narrower margin than the
+        # content, and 20 pt against 40 is a decision rather than a slip.
+        assert check(*titled_row(), card("logo", 820, 480, 120, 40, z=9)) == []
 
     def test_a_shape_bleeding_off_the_edge_is_meant(self):
         photo = shape("photo", 760, 0, 200, 540, z=9, type=msoPicture)
@@ -580,14 +588,23 @@ class TestTitles:
         assert find_title(cover, H) is None
         assert deck_findings([cover, titled(2), titled(3), titled(4)], H) == []
 
-    def test_slides_on_different_layouts_are_not_compared(self):
-        slides = [titled(2), titled(3), titled(4, size=36, layout="Section")]
-        assert deck_findings(slides, H) == []
+    def test_slides_on_different_layouts_are_compared(self):
+        # Live: one slide on the Title and Content layout, its 44 pt title
+        # placeholder among slides with 32 pt title boxes of their own.
+        slides = [titled(2), titled(3), titled(4, size=36, layout="Title and Content")]
+        [finding] = deck_findings(slides, H)
+        assert finding["slides"] == [4]
 
     def test_a_title_placeholder_is_the_title_whatever_its_size(self):
-        heading = shape("Title 1", 40, 300, 880, 60, type=msoPlaceholder,
+        heading = shape("Title 1", 40, 30, 880, 60, type=msoPlaceholder,
                         placeholder_type=1, words=text())
         assert find_title(slide(heading), H) is heading
+
+    def test_a_section_headers_title_lower_on_the_slide_is_not_compared(self):
+        section = shape("Title 1", 40, 220, 880, 80, type=msoPlaceholder,
+                        placeholder_type=1, words=text())
+        assert find_title(slide(section, layout="Section Header"), H) is None
+        assert deck_findings([titled(2), slide(section, index=3), titled(4), titled(5)], H) == []
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +685,8 @@ class FakeRange:
             return SimpleNamespace(Count=len(self._runs))
         text, rgb, size, bold = self._runs[i - 1]
         return SimpleNamespace(Text=text, Font=SimpleNamespace(
-            Color=SimpleNamespace(RGB=rgb), Size=size, Bold=bold))
+            Color=SimpleNamespace(RGB=rgb), Size=size, Bold=bold,
+            Name="Calibri Light" if size >= 30 else "Calibri"))
 
     def Paragraphs(self, i):
         return SimpleNamespace(ParagraphFormat=SimpleNamespace(Alignment=self._alignment))
@@ -707,8 +725,8 @@ class TestTheWindowsReader:
                 ("   ", 0xFFFFFF, 99.0, msoFalse), ("again", 0x000000, 12.0, msoFalse)]
         words = layout_check._shape_facts(fake_shape(runs=runs), 1, None)["text"]
         assert words["runs"] == [
-            {"color_hex": "#000000", "size": 12.0, "bold": False},
-            {"color_hex": "#000000", "size": 40.0, "bold": True},
+            {"color_hex": "#000000", "size": 12.0, "bold": False, "font": "Calibri"},
+            {"color_hex": "#000000", "size": 40.0, "bold": True, "font": "Calibri Light"},
         ]
 
     def test_a_bound_powerpoint_will_not_give_stays_unknown(self):
@@ -782,3 +800,267 @@ class TestWhatAWriteReads:
         assert layout_check.needs_background([words], None)
         assert layout_check.needs_background([words], ["words"])
         assert not layout_check.needs_background([words, card("c", 0, 0, 5, 5)], ["c"])
+
+
+# ---------------------------------------------------------------------------
+# A real deck
+# ---------------------------------------------------------------------------
+# Fourteen slides built through the MCP server on PowerPoint for Mac the way
+# a model builds them, read back as the checks read them, before and after
+# their findings were fixed. Every finding below was checked against a
+# screenshot of the slide, and so was every slide reported clean.
+FIXTURES = Path(__file__).parent / "fixtures" / "layout"
+
+
+def recorded(name):
+    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def findings_by_slide(deck):
+    return {
+        s["slide_index"]: [(f["type"], f["shapes"][0])
+                           for f in slide_findings(s, deck["slide_width"], deck["slide_height"])]
+        for s in deck["slides"]
+    }
+
+
+class TestARealDeck:
+    SEEN = {
+        1: [],                                   # cover: centred placeholders, corner logo
+        2: [("misaligned", "TextBox 7")],         # agenda item 3, 2 pt low
+        3: [("cramped_text", "TextBox 13")],      # the long KPI label on the card's edge
+        4: [("misaligned", "Shape_234")],         # one card 2 pt low, with its contents
+        5: [("off_slide", "TextBox 17"),          # the last timeline label, off the edge
+            ("misaligned", "TextBox 17")],        # and 20 pt off its dot
+        6: [],                                   # section band bleeding off both sides
+        7: [],                                   # two columns
+        8: [("overlap", "TextBox 3")],           # the caption into the table
+        9: [],                                   # chart and takeaways
+        10: [("misaligned", "TextBox 6")],       # a name 3 pt off its photo
+        11: [],                                  # centred quote, corner logo
+        12: [("low_contrast", "TextBox 10")],    # dark text on a dark card
+        13: [],                                  # its title differs from the deck's
+        14: [],                                  # closing slide, corner logo
+    }
+
+    def test_each_slide_reports_what_its_screenshot_shows(self):
+        assert findings_by_slide(recorded("realdeck_broken_mac")) == self.SEEN
+
+    def test_the_odd_title_is_reported_in_every_way_it_differs(self):
+        deck = recorded("realdeck_broken_mac")
+        found = deck_findings(deck["slides"], deck["slide_height"])
+        assert {f["message"].split(":")[0] for f in found} == {
+            f"Slide titles differ in {what}"
+            for what in ("size", "left edge", "top edge", "weight", "colour")
+        }
+        assert all(f["slides"] == [13] for f in found)
+        # Its frame was in place; its line was anchored at the bottom.
+        [top] = [f for f in found if "top edge" in f["message"]]
+        assert "vertical_anchor='top'" in top["fix"]
+
+    def test_the_fixes_say_what_was_done(self):
+        deck = recorded("realdeck_broken_mac")
+        fixes = {}
+        for s in deck["slides"]:
+            for f in slide_findings(s, deck["slide_width"], deck["slide_height"]):
+                fixes[(s["slide_index"], f["type"])] = f["fix"]
+        # The KPI row grows as one.
+        assert "shape_names=['Shape_225', 'Shape_222', 'Shape_223', 'Shape_224']" in fixes[(3, "cramped_text")]
+        # The card moves with what is on it.
+        assert "'Shape_235', 'TextBox 20', 'TextBox 21'" in fixes[(4, "misaligned")]
+        # Centred on its dot, the label is shortened, never moved off it.
+        assert fixes[(5, "off_slide")].startswith("Shorten the text of 'TextBox 17'")
+        # The caption moves, not the table.
+        assert fixes[(8, "overlap")].startswith("Move 'TextBox 3' down")
+        # Body text takes the other body text's colour, not the headings'.
+        assert "#CBD5E1" in fixes[(12, "low_contrast")]
+
+    def test_the_fixed_deck_is_clean(self):
+        deck = recorded("realdeck_fixed_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"]) == []
+
+
+# ---------------------------------------------------------------------------
+# What text keeps to
+# ---------------------------------------------------------------------------
+def placed(name, left, top, width, height, text_left, text_top, text_width, text_height, z=1):
+    """A text box whose text PowerPoint drew at the given place."""
+    box = textbox(name, left, top, width, height, z=z)
+    box["text"].update(left=text_left, top=text_top, width=text_width, height=text_height)
+    return box
+
+
+class TestWhereTextKeeps:
+    def test_left_set_text_hugs_the_left_inset(self):
+        title = placed("t", 40, 30, 880, 46, 47.2, 33.6, 195, 38.4)
+        assert layout_check._text_anchor(title) == ("left", "full")
+
+    def test_centred_text_is_centred_even_a_few_points_off(self):
+        # PowerPoint for Mac reported this label 3 pt off the centre it was set to.
+        label = placed("l", 0, 300, 160, 23.02, 33.47, 303.6, 96.07, 15.6)
+        assert layout_check._text_anchor(label) == ("center", "full")
+
+    def test_right_set_text_hugs_the_right_inset(self):
+        note = placed("n", 160, 320, 640, 30, 600, 323.6, 192.8, 22.8)
+        assert layout_check._text_anchor(note)[0] == "right"
+
+    def test_text_at_the_top_of_a_tall_frame(self):
+        body = placed("b", 40, 100, 400, 300, 47.2, 103.6, 200, 60)
+        assert layout_check._text_anchor(body) == ("left", "top")
+
+    def test_a_reader_sees_only_the_edges_text_keeps_to(self):
+        label = placed("l", 0, 300, 160, 23.02, 33.47, 303.6, 96.07, 15.6)
+        assert layout_check._seen_edges(label) == {"center", "top", "middle", "bottom"}
+        assert layout_check._seen_edges(card("c", 0, 0, 10, 10)) is None
+
+
+# ---------------------------------------------------------------------------
+# Margins, from more kinds of slide
+# ---------------------------------------------------------------------------
+class TestWhatAMarginIs:
+    def test_centred_text_keeps_no_margin(self):
+        # Live: a centred quote 160 pt in from both sides made a "160 pt
+        # margin", and the corner logo was reported against it.
+        quote = placed("quote", 160, 150, 640, 160, 230, 153.6, 500, 70)
+        attribution = placed("by", 160, 320, 640, 30, 600, 323.6, 192.8, 22.8, z=2)
+        logo = card("logo", 840, 468, 80, 32, z=3)
+        assert check(quote, attribution, logo) == []
+
+    def test_a_cover_on_its_placeholders_has_no_margin_to_break(self):
+        title = placed("title", 120, 88, 720, 188, 290, 150, 380, 70)
+        title.update(type=msoPlaceholder, placeholder_type=3)
+        logo = card("logo", 840, 468, 80, 32, z=2)
+        assert check(title, logo) == []
+
+    def test_a_margin_is_kept_on_both_sides(self):
+        # Live, the agenda: four circles 60 pt in on the left made 60 pt the
+        # most common distance, and the title, 40 pt in, was reported.
+        title = placed("title", 40, 30, 880, 46, 47.2, 33.6, 120, 38.4)
+        dots = [card(f"dot{i}", 60, 130 + 80 * i, 44, 44, z=2 + i) for i in range(4)]
+        layout = layout_check._layout([title, *dots], W, H)
+        assert layout["margins"]["horizontal"] == 40.0
+        assert "narrow_margin" not in kinds(check(title, *dots))
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+class TestLabels:
+    def test_a_label_off_the_edge_is_narrowed_around_its_centre(self):
+        # Centred on its dot at 820 pt, 300 pt of text runs 10 pt off the edge.
+        dot = card("dot", 810, 270, 20, 20, z=8)
+        label = placed("label", 620, 300, 400, 23, 670, 303.6, 300, 15.6, z=9)
+        found = check(*titled_row(heights=(100, 100, 100)), dot, label)
+        [finding] = [f for f in found if f["type"] == "off_slide"]
+        assert finding["fix"].startswith("Narrow 'label' to ")
+        assert "around its centre" in finding["fix"]
+
+    def test_a_label_well_off_its_dot_is_reported(self):
+        dot = card("dot", 870, 270, 20, 20, z=1)
+        label = placed("label", 780 + 20, 300, 200, 23, 821.5, 303.6, 160, 15.6, z=2)
+        [finding] = [f for f in check(dot, label) if f["type"] == "misaligned"]
+        assert finding["shapes"] == ["label", "dot"]
+        assert "left=780" in finding["fix"]
+
+    def test_a_centred_name_is_compared_by_its_centre_only(self):
+        # Live: a name 3 pt off its photo was also reported against the
+        # left edge of the frame under it, which no one can see.
+        photo = card("photo", 310, 120, 110, 110, z=1)
+        name = placed("name", 288, 245, 160, 29, 326.2, 248.6, 87.8, 21.6, z=2)
+        role = placed("role", 285, 275, 160, 24, 343, 278.6, 47.1, 16.8, z=3)
+        [finding] = [f for f in check(photo, name, role) if f["type"] == "misaligned"]
+        assert finding["edge"] == "center"
+        assert set(finding["shapes"]) == {"name", "photo", "role"}
+
+
+# ---------------------------------------------------------------------------
+# What else a real deck gets wrong
+# ---------------------------------------------------------------------------
+class TestSpacingIsForShapesThatPaint:
+    def test_text_beside_a_row_of_icons_is_not_spaced(self):
+        dots = [card(f"dot{i}", 60, 130 + 80 * i, 44, 44, z=1 + i) for i in range(4)]
+        items = [textbox(f"item{i}", 124, 134 + 80 * i + (3 if i == 2 else 0), 600, 34,
+                         z=5 + i, text_width=200, text_height=26.8) for i in range(4)]
+        assert "uneven_spacing" not in kinds(check(*dots, *items))
+
+
+class TestCollisions:
+    def test_the_smaller_shape_moves_and_clears(self):
+        table = shape("table", 40, 110, 880, 250, z=1, type=msoTable)
+        caption = textbox("caption", 40, 350, 880, 30, z=2, text_width=160, text_height=15)
+        [finding] = [f for f in check(table, caption) if f["type"] == "overlap"]
+        assert finding["fix"].startswith("Move 'caption' down by ")
+        assert "6 pt between it and 'table'" in finding["fix"]
+
+
+class TestContrastSuggestions:
+    def test_body_text_takes_the_colour_of_body_text(self):
+        headings = [textbox(f"h{i}", 60 + 300 * i, 150, 240, 36, z=1 + i,
+                            runs=[{"color_hex": "#F8FAFC", "size": 20.0, "bold": True}])
+                    for i in range(3)]
+        bodies = [textbox(f"b{i}", 60 + 300 * i, 196, 240, 100, z=4 + i,
+                          runs=[{"color_hex": "#CBD5E1", "size": 16.0, "bold": False}])
+                  for i in range(2)]
+        dim = textbox("dim", 660, 196, 240, 100, z=9,
+                      runs=[{"color_hex": "#475569", "size": 16.0, "bold": False}])
+        found = check(*headings, *bodies, dim, background="#0F172A")
+        [finding] = [f for f in found if f["type"] == "low_contrast"]
+        assert "color='#CBD5E1'" in finding["fix"]
+
+
+class TestDeckTitles:
+    @staticmethod
+    def titled_with(index, runs, background="#FFFFFF"):
+        title = textbox(f"Title {index}", 40, 30, 880, 60, runs=runs)
+        return slide(title, index=index, background=background)
+
+    def test_a_title_in_another_typeface_is_reported(self):
+        body = [{"color_hex": "#1F2937", "size": 32.0, "bold": True, "font": "Calibri"}]
+        light = [{"color_hex": "#1F2937", "size": 32.0, "bold": True, "font": "Calibri Light"}]
+        slides = [self.titled_with(i, body) for i in (2, 3, 4)] + [self.titled_with(5, light)]
+        [finding] = deck_findings(slides, H)
+        assert "font_name='Calibri'" in finding["fix"]
+
+    def test_a_light_title_on_a_dark_slide_is_meant(self):
+        dark = [{"color_hex": "#1F2937", "size": 32.0, "bold": True}]
+        light = [{"color_hex": "#F8FAFC", "size": 32.0, "bold": True}]
+        slides = [self.titled_with(i, dark) for i in (2, 3, 4)]
+        slides.append(self.titled_with(5, light, background="#0F172A"))
+        assert deck_findings(slides, H) == []
+
+    def test_a_title_moving_takes_the_body_lined_up_with_it(self):
+        def page(index, left):
+            words = [{"color_hex": "#222222", "size": 32.0, "bold": True}]
+            title = textbox(f"Title {index}", left, 30, 840, 60, runs=words)
+            body = textbox(f"Body {index}", left, 140, 840, 300, z=2)
+            return slide(title, body, index=index)
+        slides = [page(2, 40), page(3, 40), page(4, 66)]
+        [finding] = deck_findings(slides, H)
+        assert "shape_names=['Title 4', 'Body 4'] dleft=-26" in finding["fix"]
+
+
+class TestSampleText:
+    @pytest.mark.parametrize("words, sample", [
+        ("Lorem ipsum dolor sit amet", "Lorem ipsum"),
+        ("Click to add text", "Click to add"),
+        ("Your title here", "Your title"),
+        ("Prepared for [Client name]", "[Client name]"),
+        ("Revenue grew XX% this year", "XX%"),
+        ("Margin of XX.X points", "XX.X"),
+    ])
+    def test_stand_in_text_is_reported(self, words, sample):
+        box = textbox("t", 100, 100, 400, 40)
+        box["text"]["content"] = words
+        [finding] = check(box)
+        assert finding["type"] == "sample_text"
+        assert finding["sample"] == sample
+
+    @pytest.mark.parametrize("words", [
+        "Super Bowl XX", "Sizes up to XXL", "See note [1]", "Our text here is final",
+        "The name of the game",
+    ])
+    def test_real_text_is_not(self, words):
+        box = textbox("t", 100, 100, 400, 40)
+        box["text"]["content"] = words
+        assert check(box) == []
