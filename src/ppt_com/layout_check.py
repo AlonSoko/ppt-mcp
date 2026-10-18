@@ -669,9 +669,13 @@ def _spans(row, boxes, slide_w, margin) -> bool:
     return on_margin and left < zone and right < zone
 
 
-def _row_fix(row, boxes, slide_w, margin):
+def _row_fix(row, boxes, slide_w, margin, layout=None):
     """The fix that spreads ``row`` evenly between the side margins, or None
-    when it is already there or too wide to fit."""
+    when it is already there or too wide to fit.
+
+    A card moves with what is on it, its label or its figure, so the fix for
+    a row of cards carries each card's contents along.
+    """
     widths = [_width(boxes[s["name"]]) for s in row]
     room = slide_w - 2 * margin - sum(widths)
     if room <= 0:
@@ -679,14 +683,26 @@ def _row_fix(row, boxes, slide_w, margin):
     gap = room / (len(row) - 1)
     moves, x = [], margin
     for shape, width in zip(row, widths, strict=True):
-        if abs(boxes[shape["name"]][0] - x) > 0.05:
-            moves.append(f"of '{shape['name']}' to {_pt(x)}")
+        by = x - boxes[shape["name"]][0]
+        if abs(by) > 0.05:
+            carried = []
+            if layout is not None:
+                carried = [s["name"] for s in layout["arranged"]
+                           if s is not shape and s["name"] in boxes
+                           and _belongs_to(s, shape, boxes)]
+            moves.append((shape["name"], x, by, carried))
         x += width + gap
     if not moves:
         return None
-    return (f"Set left {' and '.join(moves)} (ppt_update_shape). Every gap is "
-            f"then {_pt(gap)}, and the row keeps the {_pt(margin)} side "
+    tail = (f"Every gap is then {_pt(gap)}, and the row keeps the {_pt(margin)} side "
             f"margins the rest of the slide keeps.")
+    if not any(carried for _, _, _, carried in moves):
+        listed = " and ".join(f"of '{name}' to {_pt(left)}" for name, left, _, _ in moves)
+        return f"Set left {listed} (ppt_update_shape). {tail}"
+    calls = [f"'{name}'" + (" with what is on it" if carried else "") + f" to {_pt(left)} "
+             f"(ppt_update_shape shape_names={[name] + carried} dleft={_num(by)})"
+             for name, left, by, carried in moves]
+    return f"Move {', and '.join(calls)}. {tail}"
 
 
 _OPPOSITE = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}
@@ -1804,7 +1820,7 @@ def _uneven_spacing(slide_index, layout, slide_w):
         names = [s["name"] for s in members]
         fix = None
         if direction == "horizontal" and margin is not None and _spans(members, boxes, slide_w, margin):
-            fix = _row_fix(members, boxes, slide_w, margin)
+            fix = _row_fix(members, boxes, slide_w, margin, layout)
         if fix is None:
             even = sum(gaps) / len(gaps)
             fix = (f"ppt_distribute_shapes with these shape names and "
@@ -2019,7 +2035,8 @@ def _narrow_margins(slide_index, layout, slide_w):
                 continue
             name, box = shape["name"], boxes[shape["name"]]
             row = rows.get(name)
-            fix = _row_fix(row, boxes, slide_w, side) if row and _spans(row, boxes, slide_w, side) else None
+            fix = (_row_fix(row, boxes, slide_w, side, layout)
+                   if row and _spans(row, boxes, slide_w, side) else None)
             if fix is None and _width(box) > slide_w - 2 * side:
                 fix = (f"Make '{name}' {_pt(_width(box) - slide_w + 2 * side)} "
                        f"narrower and move it to the margin (ppt_update_shape "
@@ -2236,25 +2253,43 @@ def deck_findings(slides, slide_h, slide_w=None):
     if len(titled) < _MIN_TITLED_SLIDES:
         return []
 
-    # A slide with a photo, or anything else that paints, where the other
-    # titles sit has its title elsewhere because it has to: a different
-    # layout, not a slip. Its title is not held to their position.
-    usual = {}
-    for field in ("left", "top"):
-        groups = _clusters([(i, _title_edge(t, field)) for i, t in titled], _NEAR_MISS)
-        usual[field] = sorted(v for _, v in groups[0])[len(groups[0]) // 2]
-    # A title placeholder far from where the others start is where its layout
+    # A title is placed by the side its text keeps to. A right-aligned title,
+    # a Hebrew or Arabic deck's, keeps its right edge from slide to slide while
+    # its left edge moves with the length of the words; a centred one keeps its
+    # middle. Text that fills its frame keeps to both sides.
+    side = {i: _title_side(t) for i, t in titled}
+    usual = {"top": _usual([(i, _title_edge(t, "top")) for i, t in titled])}
+    for field in ("left", "right", "center"):
+        values = [(i, _title_edge(t, field)) for i, t in titled if side[i] in (field, "full")]
+        if values:
+            usual[field] = _usual(values)
+
+    def home(i, t):
+        """The side this title keeps to, and how far its text is from the usual place there."""
+        field = "left" if side[i] == "full" else side[i]
+        return field, _title_edge(t, field) - usual[field]
+
+    # A title placeholder far from where the others sit is where its layout
     # put it, in the size and colour the layout gave it for that place: a
     # caption layout's title in its side column. It is the template's design,
     # so it is held to none of the others. A title box of the caller's own is.
     if slide_w:
         titled = [(i, t) for i, t in titled
                   if t.get("placeholder_type") not in _TITLE_PLACEHOLDERS
-                  or abs(_title_edge(t, "left") - usual["left"]) <= _TITLE_ELSEWHERE * slide_w]
+                  or abs(home(i, t)[1]) <= _TITLE_ELSEWHERE * slide_w]
         if len(titled) < _MIN_TITLED_SLIDES:
             return []
-    elsewhere = {i for i, t in titled
-                 if _title_spot_taken(t, by_index[i], usual["left"], usual["top"], slide_w, slide_h)}
+    # A slide with a photo, or anything else that paints, where the other
+    # titles sit has its title elsewhere because it has to: a different
+    # layout, not a slip. Its title is not held to their position.
+    elsewhere = set()
+    for i, t in titled:
+        words = text_box(t) or shape_box(t)
+        shift = home(i, t)[1]
+        spot = (words[0] - shift, usual["top"], words[2] - shift,
+                usual["top"] + _height(words))
+        if _title_spot_taken(t, by_index[i], spot, slide_w, slide_h):
+            elsewhere.add(i)
     # Each layout of a template sets its own title: a caption layout's smaller,
     # a statement layout's larger. When most titles are the template's, the
     # template is what the deck follows, and a title it styled differs from
@@ -2277,10 +2312,13 @@ def deck_findings(slides, slide_h, slide_w=None):
     for label, read, tolerance, field in (
         ("size", _largest_size, _TITLE_SIZE_TOLERANCE, None),
         ("left edge", lambda s: _title_edge(s, "left"), _NEAR_MISS, "left"),
+        ("right edge", lambda s: _title_edge(s, "right"), _NEAR_MISS, "right"),
+        ("centre", lambda s: _title_edge(s, "center"), _NEAR_MISS, "center"),
         ("top edge", lambda s: _title_edge(s, "top"), _NEAR_MISS, "top"),
     ):
         values = [(index, read(shape)) for index, shape in titled
-                  if read(shape) is not None and not (field and index in elsewhere)]
+                  if read(shape) is not None and not (field and index in elsewhere)
+                  and (field in (None, "top") or side[index] in (field, "full"))]
         groups = _clusters(values, tolerance)
         if len(groups) < 2:
             continue
@@ -2304,7 +2342,7 @@ def deck_findings(slides, slide_h, slide_w=None):
                    f"font_size={round(usual_value, 1):g}).")
         else:
             moves = _title_moves(field, usual_value, odd, titled, by_index)
-            fix = (f"Set {field} of the titles on {_slides(odd)} to "
+            fix = (f"Set the {label} of the titles on {_slides(odd)} to "
                    f"{round(usual_value, 1):g} pt: {moves}.")
         findings.append(_finding(
             None, "inconsistent_titles", names,
@@ -2312,6 +2350,12 @@ def deck_findings(slides, slide_h, slide_w=None):
             fix, severity="warning", slides=sorted(odd),
         ))
 
+    findings += _title_differences(
+        "alignment", [(index, title, side[index]) for index, title in titled
+                      if side[index] != "full"],
+        lambda value: f"to {value} alignment",
+        lambda value: f"alignment='{value}'", held, tool="ppt_set_paragraph_format",
+    )
     findings += _title_differences(
         "weight", [(index, title, _title_weight(title)) for index, title in titled],
         lambda value: f"in {value}" if value == "bold" else "in regular weight",
@@ -2346,10 +2390,20 @@ def _template_title(title) -> bool:
             and all(run.get("theme") for run in runs))
 
 
-def _title_spot_taken(title, slide, left, top, slide_w, slide_h):
+def _usual(values):
+    """The middle of the largest group of (slide, value) pairs that agree."""
+    group = _clusters(values, _NEAR_MISS)[0]
+    return sorted(v for _, v in group)[len(group) // 2]
+
+
+def _title_side(title):
+    """The side of its frame a title's text keeps to: left, right, center or full."""
+    across = (_text_anchor(title) or (None, None))[0]
+    return across if across in ("right", "center", "full") else "left"
+
+
+def _title_spot_taken(title, slide, spot, slide_w, slide_h):
     """Whether something on this slide paints where the deck's titles go."""
-    words = text_box(title) or shape_box(title)
-    spot = (left, top, left + _width(words), top + _height(words))
     for shape in slide["shapes"]:
         if shape is title or not shape.get("visible", True) or _is_line(shape):
             continue
@@ -2368,7 +2422,8 @@ def _title_edge(title, field):
     taller than its line, with the line anchored at its middle or bottom.
     """
     box = text_box(title) or shape_box(title)
-    return box[0] if field == "left" else box[1]
+    return {"left": box[0], "top": box[1], "right": box[2],
+            "center": (box[0] + box[2]) / 2}[field]
 
 
 def _title_weight(title):
@@ -2391,7 +2446,7 @@ def _title_colour(title):
     return max(set(colours), key=colours.count) if colours else None
 
 
-def _title_differences(label, entries, as_words, as_call, held=None):
+def _title_differences(label, entries, as_words, as_call, held=None, tool="ppt_format_text"):
     """Titles that differ in a setting with no in-between, a weight or a colour.
 
     ``held(i, usual)`` says whether slide i's title is held to the titles of
@@ -2418,7 +2473,7 @@ def _title_differences(label, entries, as_words, as_call, held=None):
     return [_finding(
         None, "inconsistent_titles", names,
         f"Slide titles differ in {label}: {described}.",
-        f"Set the titles on {_slides(odd)} {as_words(usual)} (ppt_format_text "
+        f"Set the titles on {_slides(odd)} {as_words(usual)} ({tool} "
         f"{as_call(usual)}).",
         severity="warning", slides=odd,
     )]
@@ -2456,18 +2511,26 @@ def _title_moves(field, value, odd, titled, by_index):
                              "on it, which sets its text where the other titles' text is")
                 continue
         along = [shape["name"] for shape in by_index[index]["shapes"]
-                 if shape is not title and abs(shape[field] - title[field]) <= _ALIGNED]
+                 if shape is not title
+                 and abs(_frame_edge(shape, field) - _frame_edge(title, field)) <= _ALIGNED]
+        moved = "top" if field == "top" else "left"
         if along:
             names = [title["name"]] + along
             listed = ", ".join(f"'{n}'" for n in along)
             parts.append(
                 f"on slide {index}, ppt_update_shape shape_names={names} "
-                f"d{field}={_num(by)}, which moves {listed}, lined up with the "
+                f"d{moved}={_num(by)}, which moves {listed}, lined up with the "
                 "title, along with it")
         else:
-            parts.append(f"on slide {index}, ppt_update_shape {field}="
-                         f"{_num(title[field] + by)} on '{title['name']}'")
+            parts.append(f"on slide {index}, ppt_update_shape {moved}="
+                         f"{_num(title[moved] + by)} on '{title['name']}'")
     return "; ".join(parts)
+
+
+def _frame_edge(shape, field):
+    return {"left": shape["left"], "top": shape["top"],
+            "right": shape["left"] + shape["width"],
+            "center": shape["left"] + shape["width"] / 2}[field]
 
 
 # ---------------------------------------------------------------------------

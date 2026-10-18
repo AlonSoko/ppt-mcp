@@ -1143,6 +1143,37 @@ class TestAThemedDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+class TestARightToLeftDeckOnWindows:
+    # Eight Hebrew slides built on Windows, titles and text set right, as a
+    # model writing Hebrew sets them: a title's right edge stays put from slide
+    # to slide while its left edge moves with the length of the words.
+    SEEN = {
+        1: [], 2: [], 3: [], 4: [], 5: [],
+        6: [],                                          # its title is set left: the deck's finding
+        7: [("uneven_spacing", "Rounded Rectangle 6")],  # cards 32 and 20 pt apart
+        8: [],
+    }
+
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("rtldeck_broken_win")) == self.SEEN
+
+    def test_right_set_titles_are_compared_on_their_right_edge(self):
+        deck = recorded("rtldeck_broken_win")
+        [found] = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert found["message"] == ("Slide titles differ in alignment: right on slides 2, 3, 4, 5, 7, 8; "
+                                    "left on slide 6.")
+        assert found["fix"].endswith("(ppt_set_paragraph_format alignment='right').")
+
+    def test_the_cards_move_with_their_labels(self):
+        fixes = fixes_of(recorded("rtldeck_broken_win"))
+        assert "shape_names=['Rounded Rectangle 6', 'TextBox 7'] dleft=-18" in fixes[(7, "uneven_spacing")]
+
+    def test_the_fixed_deck_is_clean(self):
+        fixed = recorded("rtldeck_fixed_win")
+        assert all(found == [] for found in findings_by_slide(fixed).values())
+        assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+
+
 # ---------------------------------------------------------------------------
 # What text keeps to
 # ---------------------------------------------------------------------------
@@ -1759,3 +1790,46 @@ class TestWhichWritesReport:
         monkeypatch.setattr(layout_check, "ppt", fake)
         result = layout_check.report_contrast({"success": True, "slide_indices": [1]}, [1])
         assert [(f["type"], f["shapes"]) for f in result["layout_issues"]] == [("low_contrast", ["grey"])]
+
+
+def set_title(index, text_left, text_width=200.0, frame_left=40.0, frame_width=880.0, top=30.0):
+    """A title box whose text PowerPoint drew at ``text_left``: set left, right or centred."""
+    title = placed(f"Title {index}", frame_left, top, frame_width, 60,
+                   text_left, top + 3.6, text_width, 40)
+    title["text"]["runs"] = [{"color_hex": "#1F2937", "size": 32.0, "bold": True}]
+    return slide(title, index=index)
+
+
+class TestTitlesSetRightOrCentred:
+    RIGHT = 40 + 880 - 7.2     # where a right-set title's text ends
+
+    def test_right_set_titles_of_any_length_agree(self):
+        slides = [set_title(i, self.RIGHT - width, width) for i, width in ((2, 120), (3, 420), (4, 250))]
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_right_set_title_off_the_right_edge_is_moved_by_it(self):
+        slides = [set_title(i, self.RIGHT - width, width) for i, width in ((2, 120), (3, 420), (4, 250))]
+        # Its frame 8 pt left of the others', its text set against the frame's right side.
+        slides.append(set_title(5, self.RIGHT - 8 - 300, 300, frame_left=32.0))
+        [found] = deck_findings(slides, H, W)
+        assert found["message"].startswith("Slide titles differ in right edge")
+        assert found["slides"] == [5] and "ppt_update_shape left=40 on 'Title 5'" in found["fix"]
+
+    def test_centred_titles_are_compared_on_their_centres(self):
+        middle = 40 + 440
+        slides = [set_title(i, middle - width / 2, width) for i, width in ((2, 120), (3, 420), (4, 250))]
+        assert deck_findings(slides, H, W) == []
+        slides.append(set_title(5, middle + 10 - 150, 300))
+        [found] = deck_findings(slides, H, W)
+        assert found["message"].startswith("Slide titles differ in centre") and found["slides"] == [5]
+
+    def test_a_title_filling_its_frame_is_not_a_different_alignment(self):
+        slides = [set_title(i, self.RIGHT - width, width) for i, width in ((2, 120), (3, 420))]
+        slides.append(set_title(4, 47.2, 865.6))
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_title_set_left_among_right_set_ones_is_reported_as_its_alignment(self):
+        slides = [set_title(i, self.RIGHT - width, width) for i, width in ((2, 120), (3, 420), (4, 250))]
+        slides.append(set_title(5, 47.2, 200))
+        [found] = deck_findings(slides, H, W)
+        assert "differ in alignment" in found["message"] and found["slides"] == [5]
