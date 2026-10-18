@@ -1299,6 +1299,12 @@ def _template_resize(a, union, named, layout):
             room = union[low] - _CLEARANCE - box[low]
             if room <= 0:
                 continue
+            if shared is None or shared > room:
+                # Squeezed alone, the card would be the odd one out of its row
+                # and its words might not fit; the whole row narrows instead.
+                fit = _fit_row(mates, layout, low, None, union[low] - _CLEARANCE, kind, named)
+                if fit:
+                    return fit
             target = shared if shared is not None and shared <= room else room
             if target < 0.5 * size:
                 continue
@@ -1311,6 +1317,10 @@ def _template_resize(a, union, named, layout):
             room = box[high] - start
             if room <= 0:
                 continue
+            if shared is None or shared > room:
+                fit = _fit_row(mates, layout, low, start, None, kind, named)
+                if fit:
+                    return fit
             target = shared if shared is not None and shared <= room else room
             if target < 0.5 * size:
                 continue
@@ -1320,6 +1330,46 @@ def _template_resize(a, union, named, layout):
                     f"(ppt_update_shape {position}={_num(new_start)} {field}={_num(target)}), "
                     f"which leaves it {_pt(new_start - union[high])} clear of {named}.")
     return None
+
+
+def _fit_row(mates, layout, low, start, end, kind, named):
+    """Narrow a row (or column) of like shapes evenly to fit between ``start`` and ``end``.
+
+    Either bound may be None, and then that end of the row stays where it is.
+    The gaps stay as they are, every card takes one new size, and each card
+    moves with what is on it.
+    """
+    boxes = layout["boxes"]
+    high = low + 2
+    members = sorted((m for m in mates if m in boxes), key=lambda m: boxes[m][low])
+    if len(members) < 2:
+        return None
+    sizes = [boxes[m][high] - boxes[m][low] for m in members]
+    first, last = boxes[members[0]][low], boxes[members[-1]][high]
+    gap = ((last - first) - sum(sizes)) / (len(members) - 1)
+    begin = first if start is None else start
+    finish = last if end is None else end
+    size = (finish - begin - gap * (len(members) - 1)) / len(members)
+    if gap < 0 or size < 0.5 * min(sizes) or size >= min(sizes):
+        return None
+    field, position = ("width", "left") if low == 0 else ("height", "top")
+    moves = []
+    for i, name in enumerate(members):
+        by = begin + i * (size + gap) - boxes[name][low]
+        if abs(by) <= 0.05:
+            continue
+        shape = next(s for s in layout["arranged"] if s["name"] == name)
+        carried = [s["name"] for s in layout["arranged"]
+                   if s is not shape and s["name"] in boxes and _belongs_to(s, shape, boxes)]
+        with_it = " with what is on it" if carried else ""
+        way = ("right" if by > 0 else "left") if low == 0 else ("down" if by > 0 else "up")
+        moves.append(f"'{name}'{with_it} {way} by {_pt(abs(by))} (ppt_update_shape shape_names="
+                     f"{[name] + carried} d{position}={_num(by)})")
+    fix = (f"Make the {kind} fit before {named}: ppt_update_shape shape_names={members} "
+           f"{field}={_num(size)}")
+    if moves:
+        fix += f", then move {', and '.join(moves)}"
+    return fix + f". The gaps stay {_pt(gap)}."
 
 
 def _template_shrink(a, union, named, keep):

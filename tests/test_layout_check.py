@@ -1930,3 +1930,20 @@ class TestDecorationsDrawnInLines:
         page["template_area"] = [[54, 353, 726, 472], [54, 54, 726, 339]]
         [found] = overlaps(slide_findings(page, W, H))
         assert found["shapes"] == ["c2", "Group 6"]
+
+
+class TestARowIntoADecoration:
+    def test_the_row_narrows_evenly_and_the_cards_take_their_labels(self):
+        lines = graphic("Group 6", 725, 233, 235, 253, type=layout_check.msoGroup, fill=None)
+        shapes = []
+        for i in range(3):
+            left = 54 + 246 * i
+            shapes.append(card(f"c{i}", left, 60, 226, 250, z=2 + 2 * i))
+            shapes.append(textbox(f"label{i}", left + 16, 76, 194, 36, z=3 + 2 * i))
+        page = templated(*shapes, template=[lines])
+        page["template_area"] = [[54, 353, 726, 472], [54, 54, 726, 339]]
+        [found] = overlaps(slide_findings(page, W, H))
+        assert found["fix"].startswith("Make the row fit before 'Group 6': ppt_update_shape "
+                                       "shape_names=['c0', 'c1', 'c2'] width=208.67")
+        assert "'c2' with what is on it left by 34.7 pt (ppt_update_shape shape_names=['c2', 'label2']" in found["fix"]
+        assert found["fix"].endswith("The gaps stay 20 pt.")
