@@ -36,8 +36,8 @@ from ppt_com.constants import (
     msoPlaceholder, msoSmartArt, msoTable, msoTextBox, msoTrue,
     ppAlignCenter, ppAlignRight,
     ppPlaceholderCenterTitle, ppPlaceholderDate, ppPlaceholderFooter,
-    ppPlaceholderHeader, ppPlaceholderSlideNumber, ppPlaceholderTitle,
-    ppPlaceholderVerticalTitle,
+    ppPlaceholderBody, ppPlaceholderHeader, ppPlaceholderObject,
+    ppPlaceholderSlideNumber, ppPlaceholderTitle, ppPlaceholderVerticalTitle,
 )
 
 logger = logging.getLogger(__name__)
@@ -916,9 +916,18 @@ def _overflow(slide_index, shapes, layout):
             fix = (f"Cut the text or make the font smaller, or "
                    f"{_grow(shape, 'bottom', needed - room, layout)}.")
         else:
-            fix = (f"Make '{name}' {_pt(needed - room)} {'wider' if vertical else 'taller'} "
-                   f"(ppt_update_shape {field}={_num(shape[field] + needed - room)}), "
-                   "cut the text, or make the font smaller.")
+            grow = needed - room
+            word = "wider" if vertical else "taller"
+            blocker = _in_the_way(shape, grow, vertical, shapes, layout)
+            if blocker:
+                # A title box grown down into the body below it trades one
+                # problem for another; the words are what has to give.
+                fix = (f"Cut the text or make the font smaller. Making '{name}' "
+                       f"{_pt(grow)} {word} would run it into {blocker}.")
+            else:
+                fix = (f"Make '{name}' {_pt(grow)} {word} "
+                       f"(ppt_update_shape {field}={_num(shape[field] + grow)}), "
+                       "cut the text, or make the font smaller.")
         findings.append(_finding(
             slide_index, "overflow", [name],
             f"The text in '{name}' needs {_pt(needed)} and the box has "
@@ -926,6 +935,38 @@ def _overflow(slide_index, shapes, layout):
             fix, needed_pt=needed, available_pt=room,
         ))
     return findings
+
+
+def _in_the_way(shape, grow, vertical, shapes, layout):
+    """What a box grown by ``grow`` would run into, as words, or None.
+
+    A box grows from its top down, or for sideways text from its left across,
+    so only the strip it gains is looked at. The card a text sits on, and what
+    sits on a card, are not in its way.
+    """
+    box = shape_box(shape)
+    strip = ((box[2], box[1], box[2] + grow, box[3]) if vertical
+             else (box[0], box[3], box[2], box[3] + grow))
+    slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
+    if slide_w and slide_h and (strip[2] > slide_w + _EDGE_TOLERANCE
+                                or strip[3] > slide_h + _EDGE_TOLERANCE):
+        return "the edge of the slide"
+    boxes = layout["boxes"]
+    for other in shapes:
+        if other is shape or not other.get("visible", True) or _is_line(other):
+            continue
+        if slide_w and slide_h and _is_backdrop(other, slide_w, slide_h):
+            continue
+        if shape["name"] in boxes and other["name"] in boxes and (
+                _belongs_to(shape, other, boxes) or _belongs_to(other, shape, boxes)):
+            continue
+        ink = ink_box(other)
+        if ink is None:
+            continue
+        width, height = _shared(strip, ink)
+        if width > _MIN_OVERLAP and height > _MIN_OVERLAP:
+            return f"'{other['name']}'" if paints_box(other) else f"the text of '{other['name']}'"
+    return None
 
 
 def _overlap(slide_index, shapes, layout):
@@ -1096,7 +1137,52 @@ def _lands_on_something(a, a_text, vertical, by, shapes, others, layout):
 _FROM = {"master": "the slide master", "layout": "the slide's layout"}
 
 
-def _template_collisions(slide_index, shapes, template, layout):
+# Placeholders that mark where a template means content to go.
+_CONTENT_PLACEHOLDERS = frozenset({
+    ppPlaceholderTitle, ppPlaceholderCenterTitle, ppPlaceholderBody, ppPlaceholderObject,
+})
+
+
+def _sparse(graphic) -> bool:
+    """Whether a template graphic is drawn in lines rather than painted solid.
+
+    A group of thin curves down the side of the slide, a fan of lines in a
+    corner: their box is mostly empty, so it says less about where they are
+    than a band's or a logo's does.
+    """
+    if graphic["type"] == msoGroup:
+        return True
+    fill = graphic.get("fill") or {}
+    return (graphic["type"] not in _OPAQUE_TYPES and fill.get("visible") is False
+            and not (graphic.get("text") or {}).get("chars"))
+
+
+def _subtract(box, cut):
+    """The parts of ``box`` outside ``cut``, as up to four boxes."""
+    width, height = _shared(box, cut)
+    if width <= 0 or height <= 0:
+        return [box]
+    top, bottom = max(box[1], cut[1]), min(box[3], cut[3])
+    parts = [(box[0], box[1], box[2], cut[1]), (box[0], cut[3], box[2], box[3]),
+             (box[0], top, cut[0], bottom), (cut[2], top, box[2], bottom)]
+    return [p for p in parts if p[2] - p[0] > _EDGE_TOLERANCE and p[3] - p[1] > _EDGE_TOLERANCE]
+
+
+def _graphic_parts(graphic, ink, area):
+    """Where a template graphic stands in the way of the slide's own shapes.
+
+    A solid graphic, wherever it is drawn. A sparse one, less the part of it
+    the template's own title and body placeholders cover: a theme that sets
+    its title over the tips of its decoration means content to go there.
+    """
+    parts = [ink]
+    if _sparse(graphic):
+        for cut in area or ():
+            parts = [piece for part in parts for piece in _subtract(part, cut)]
+    return parts
+
+
+def _template_collisions(slide_index, shapes, template, layout, area=()):
     """The slide's own shapes running into the template's graphics.
 
     A logo, a band down one side, a footer line: the template draws them on
@@ -1118,12 +1204,16 @@ def _template_collisions(slide_index, shapes, template, layout):
         if _is_backdrop(graphic, slide_w, slide_h):
             continue
         ink = ink_box(graphic)
-        if ink is not None:
-            graphics.append((graphic, ink))
-        if ink is not None or graphic.get("text") is None:
+        if ink is None and graphic.get("text") is None:
             # A graphic a write left unread, being far from what it touched,
             # still stands where a fix might move something.
-            obstacles.append((graphic, ink or shape_box(graphic)))
+            ink = shape_box(graphic)
+        elif ink is None:
+            continue
+        for part in _graphic_parts(graphic, ink, area):
+            obstacles.append((graphic, part))
+            if graphic.get("text") is not None or paints_box(graphic):
+                graphics.append((graphic, part))
     if not graphics:
         return []
     findings = []
@@ -1134,13 +1224,14 @@ def _template_collisions(slide_index, shapes, template, layout):
         a_ink = shape_box(a) if paints_box(a) else text_box(a)
         if a_ink is None:
             continue
-        hits = []
+        hits, seen = [], set()
         for graphic, ink in graphics:
             width, height = _shared(a_ink, ink)
             if width <= _MIN_OVERLAP or height <= _MIN_OVERLAP:
                 continue
-            if _inside(a_ink, ink):
+            if _inside(a_ink, ink) or graphic["name"] in seen:
                 continue
+            seen.add(graphic["name"])
             hits.append((graphic, ink, width, height))
         if hits:
             findings.append(_template_collision_finding(slide_index, a, a_ink, hits, shapes,
@@ -1290,6 +1381,10 @@ def _template_move(a, a_ink, union, named, shapes, graphics, layout):
     while grown:
         grown = False
         for graphic, ink in graphics:
+            if f"'{graphic['name']}'" in named:
+                # Another piece of a graphic already being cleared: the part
+                # of a decoration the template's own content covers stays out.
+                continue
             reach = (union[0] - _CLEARANCE, union[1] - _CLEARANCE,
                      union[2] + _CLEARANCE, union[3] + _CLEARANCE)
             w, h = _shared(reach, ink)
@@ -2135,7 +2230,7 @@ def slide_findings(slide, slide_w, slide_h, only=None):
         _off_slide(index, shapes, slide_w, slide_h, layout)
         + _overflow(index, shapes, layout)
         + _overlap(index, shapes, layout)
-        + _template_collisions(index, shapes, template, layout)
+        + _template_collisions(index, shapes, template, layout, slide.get("template_area"))
         + _low_contrast(index, shapes, slide.get("background_hex"), template,
                         slide.get("follows_background"), layout)
         + _cramped_text(index, layout)
@@ -2859,6 +2954,42 @@ def _template_facts(slide, touched=None, cache=None):
     return graphics
 
 
+def _template_area(slide, graphics, cache=None):
+    """Where the template means content to go: its master's title and body frames.
+
+    Read only when a sparse graphic needs it, since nothing else does.
+    """
+    if not any(_sparse(g) for g in graphics):
+        return []
+    key = None
+    if cache is not None:
+        try:
+            key = ("area", slide.Design.Index)
+        except Exception:
+            key = None
+        if key in cache:
+            return cache[key]
+    area = []
+    try:
+        shapes = slide.Master.Shapes
+        for i in range(1, shapes.Count + 1):
+            shape = shapes(i)
+            if shape.Type != msoPlaceholder:
+                continue
+            try:
+                if shape.PlaceholderFormat.Type not in _CONTENT_PLACEHOLDERS:
+                    continue
+            except Exception:
+                continue
+            area.append([round(shape.Left, 2), round(shape.Top, 2),
+                         round(shape.Left + shape.Width, 2), round(shape.Top + shape.Height, 2)])
+    except Exception:
+        logger.debug("Cannot read the master's placeholders", exc_info=True)
+    if key is not None:
+        cache[key] = area
+    return area
+
+
 def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     """Read the slides into the plain dicts the checks work on.
 
@@ -2899,6 +3030,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             follows = slide.FollowMasterBackground == msoTrue
         except Exception:
             follows = None
+        template = _template_facts(slide, touched, template_cache)
         facts["slides"].append({
             "slide_index": slide_index,
             "layout": layout,
@@ -2906,7 +3038,8 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
                 _background_hex(slide) if needs_background(shapes, detail) else None
             ),
             "follows_background": follows,
-            "template": _template_facts(slide, touched, template_cache),
+            "template": template,
+            "template_area": _template_area(slide, template, template_cache),
             "shapes": shapes,
         })
     return facts

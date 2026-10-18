@@ -1876,3 +1876,57 @@ class TestAChangeToTheWholeDeck:
         monkeypatch.setattr(layout_check, "ppt", FakePpt(RuntimeError("busy")))
         assert layout_check.deck_snapshot() is None
         assert layout_check.report_deck_change({"success": True}, None) == {"success": True}
+
+
+class TestATitleTooLongForItsBox:
+    def test_growing_it_into_the_body_is_not_the_fix(self):
+        # A title placeholder that PowerPoint did not shrink, its body right below.
+        title = placed("Title 1", 66, 28.75, 828, 97.2, 73.2, 12.6, 800, 129.6)
+        body = placed("Content 2", 66, 143.75, 828, 342.6, 73.2, 147.35, 600, 300, z=2)
+        [found] = [f for f in check(title, body) if f["type"] == "overflow"]
+        assert found["fix"] == ("Cut the text or make the font smaller. Making 'Title 1' 39.6 pt "
+                                "taller would run it into the text of 'Content 2'.")
+
+    def test_with_room_below_the_box_grows(self):
+        title = placed("Title 1", 66, 28.75, 828, 97.2, 73.2, 12.6, 800, 129.6)
+        [found] = [f for f in check(title) if f["type"] == "overflow"]
+        assert found["fix"].startswith("Make 'Title 1' 39.6 pt taller (ppt_update_shape height=136.8)")
+
+
+class TestDecorationsDrawnInLines:
+    # Wisp: thin curves down the left whose box reaches 225 pt in, and a
+    # title and body that the theme itself starts at 204 pt.
+    WISP_AREA = [[204, 49, 906, 150], [204, 168, 906, 474]]
+
+    def curves(self):
+        return graphic("Group 22", 0, 18, 225, 523, type=layout_check.msoGroup, fill=None)
+
+    def test_content_lined_up_with_the_themes_title_is_clear_of_them(self):
+        cards = [card(f"c{i}", 204 + 240 * i, 170, 220, 220, z=2 + i) for i in range(3)]
+        page = templated(*cards, template=[self.curves()])
+        page["template_area"] = self.WISP_AREA
+        assert overlaps(slide_findings(page, W, H)) == []
+
+    def test_text_set_in_front_of_them_is_reported_and_moved_in_line_with_the_title(self):
+        title = title_placeholder(left=204.2, top=49)
+        words = textbox("words", 40, 170, 600, 100, z=3, text_width=440, text_height=58)
+        page = templated(title, words, template=[self.curves()])
+        page["template_area"] = self.WISP_AREA
+        [found] = overlaps(slide_findings(page, W, H))
+        assert found["fix"].startswith("Move 'words' right by 164.2 pt, in line with 'Title 1'")
+
+    def test_a_solid_band_is_never_carved_out(self):
+        band = graphic("band", 0, 0, 960, 90, colour="#0B2545")
+        words = textbox("words", 100, 70, 400, 40, text_width=300, text_height=30)
+        page = templated(words, template=[band])
+        page["template_area"] = [[60, 20, 900, 80]]
+        assert [f["shapes"] for f in overlaps(slide_findings(page, W, H))] == [["words", "band"]]
+
+    def test_a_card_reaching_past_the_themes_margin_still_is(self):
+        # Slice: its fan of lines starts where its title and body end, at 726 pt.
+        lines = graphic("Group 6", 725, 233, 235, 253, type=layout_check.msoGroup, fill=None)
+        cards = [card(f"c{i}", 54 + 246 * i, 60, 226, 250, z=2 + i) for i in range(3)]
+        page = templated(*cards, template=[lines])
+        page["template_area"] = [[54, 353, 726, 472], [54, 54, 726, 339]]
+        [found] = overlaps(slide_findings(page, W, H))
+        assert found["shapes"] == ["c2", "Group 6"]

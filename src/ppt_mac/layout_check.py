@@ -310,26 +310,29 @@ def _template_facts(slide, shows, cache, touched=None):
     ``touched``, as on Windows.
     """
     from ppt_com.layout_check import within_reach
-    from ppt_com.layout_check import _TEMPLATE_Z
+    from ppt_com.layout_check import _CONTENT_PLACEHOLDERS, _TEMPLATE_Z
 
     if shows is False:
-        return []
+        return [], []
     try:
         if not slide.custom_layout.display_master_shapes():
-            return []
+            return [], []
         master = slide.slide_master
         refs = shapes_of(master)
         records = elements(master.shapes.properties)
     except Exception:
         logger.debug("Cannot read the master's graphics", exc_info=True)
-        return []
+        return [], []
     if len(records) != len(refs):
         records = [{} for _ in refs]
-    graphics = []
+    graphics, area = [], []
     for ref, record in zip(refs, records, strict=True):
         record = record if isinstance(record, dict) else {}
         facts = _geometry_facts(ref, record, _TEMPLATE_Z + len(graphics))
         if facts["type"] == msoPlaceholder:
+            if facts["placeholder_type"] in _CONTENT_PLACEHOLDERS:
+                area.append([facts["left"], facts["top"], round(facts["left"] + facts["width"], 2),
+                             round(facts["top"] + facts["height"], 2)])
             continue
         key = (facts["name"], facts["left"], facts["top"], facts["width"], facts["height"])
         if key not in cache:
@@ -339,7 +342,7 @@ def _template_facts(slide, shows, cache, touched=None):
             facts["source"] = "master"
             cache[key] = facts
         graphics.append({**cache[key], "z": _TEMPLATE_Z + len(graphics)})
-    return graphics
+    return graphics, area
 
 
 def _layout_name(word):
@@ -392,6 +395,9 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         )
         for shape in shapes:
             shape.pop("_has_text_frame", None)
+        template, area = _template_facts(
+            slide, None if shows is None else bool(shows), template_cache,
+            None if detail is None else [s for s in shapes if s["name"] in detail])
         facts["slides"].append({
             "slide_index": slide_index,
             "layout": _layout_name(own.get(k.layout)),
@@ -400,9 +406,8 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
                 if needs_background(shapes, detail) else None
             ),
             "follows_background": None if follows is None else bool(follows),
-            "template": _template_facts(
-                slide, None if shows is None else bool(shows), template_cache,
-                None if detail is None else [s for s in shapes if s["name"] in detail]),
+            "template": template,
+            "template_area": area,
             "shapes": shapes,
         })
     return facts
