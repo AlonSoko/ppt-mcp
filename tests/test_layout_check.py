@@ -881,6 +881,58 @@ class TestARealDeck:
         assert deck_findings(deck["slides"], deck["slide_height"]) == []
 
 
+class TestASecondRealDeck:
+    # Eleven more slides, the patterns the first deck did not have: a photo
+    # filling half the slide, a pricing row with its middle plan featured,
+    # process chevrons, a 2x2 matrix, an org chart on connectors, a column of
+    # big figures, grouped icons, a full-bleed photo with text on it.
+    SEEN = {
+        1: [],                                          # photo left, text right
+        2: [("misaligned", "TextBox 4")],               # one price 2 pt low on its card
+        3: [("overflow", "Shape_283"),                  # the last step's text in its chevron
+            ("narrow_margin", "Shape_283")],            # and the row 5 pt short of the margin
+        4: [("misaligned", "TextBox 7")],               # one quadrant label 3 pt off
+        5: [("misaligned", "Shape_287")],               # one report 3 pt low
+        6: [("uneven_spacing", "TextBox 2"),            # the figures 30 and 42 pt apart
+            ("uneven_spacing", "TextBox 3")],           # and their labels with them
+        7: [],                                          # bullets that fit their box
+        8: [],                                          # white text on a full-bleed photo
+        9: [("uneven_spacing", "Group 4")],             # grouped icons 100 and 108 pt apart
+        10: [("sample_text", "TextBox 2"),              # lorem ipsum
+             ("sample_text", "TextBox 4")],             # and XX%
+        11: [("overlap", "TextBox 2")],                 # a subtitle wrapped into the cards
+    }
+
+    def test_each_slide_reports_what_its_screenshot_shows(self):
+        assert findings_by_slide(recorded("realdeck2_broken_mac")) == self.SEEN
+
+    def test_no_title_is_out_of_place(self):
+        # The photo slide's title sits beside the photo, where it has to; the
+        # figures slide's big numbers are not its title.
+        deck = recorded("realdeck2_broken_mac")
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+    def test_the_fixes_say_what_was_done(self):
+        deck = recorded("realdeck2_broken_mac")
+        fixes = {}
+        for s in deck["slides"]:
+            for f in slide_findings(s, deck["slide_width"], deck["slide_height"]):
+                fixes.setdefault((s["slide_index"], f["type"]), f["fix"])
+        # The price that sits differently on its card moves, not the other.
+        assert fixes[(2, "misaligned")].startswith("Set top of 'TextBox 4'")
+        # A step of a process is shortened, or the whole row grows.
+        assert fixes[(3, "overflow")].startswith("Cut the text or make the font smaller")
+        # Grouped icons set in from the sides keep their ends.
+        assert fixes[(9, "uneven_spacing")].startswith("ppt_distribute_shapes")
+        # Moving the subtitle up would jam it under the title: the cards move.
+        assert fixes[(11, "overlap")].startswith("Move 'Shape_294', 'Shape_295', 'Shape_296' down")
+
+    def test_the_fixed_deck_is_clean(self):
+        deck = recorded("realdeck2_fixed_mac")
+        assert all(found == [] for found in findings_by_slide(deck).values())
+        assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
 # ---------------------------------------------------------------------------
 # What text keeps to
 # ---------------------------------------------------------------------------
@@ -1064,3 +1116,95 @@ class TestSampleText:
         box = textbox("t", 100, 100, 400, 40)
         box["text"]["content"] = words
         assert check(box) == []
+
+
+class TestWhatAWriteCannotSee:
+    def test_a_text_frame_the_write_did_not_read_is_not_lined_up_against(self):
+        # Live: distributing three groups, the write compared the middle one's
+        # centre with the centre of the unread title frame, 4 pt away.
+        title = shape("title", 40, 30, 880, 60, type=msoTextBox, line=False,
+                      fill={"visible": False, "solid": True, "color_hex": "#FFFFFF",
+                            "transparency": 0.0})
+        groups = [card(f"g{i}", left, 170, 180, 136, z=2 + i)
+                  for i, left in enumerate((110, 394, 678))]
+        found = slide_findings(slide(title, *groups), W, H, only={"g1"})
+        assert found == []
+
+    def test_an_unread_title_frame_still_marks_the_margins(self):
+        title = shape("title", 40, 30, 880, 60, type=msoTextBox, line=False,
+                      fill={"visible": False, "solid": True, "color_hex": "#FFFFFF",
+                            "transparency": 0.0})
+        cards = [card(f"c{i}", left, 140, 280, 180, z=2 + i)
+                 for i, left in enumerate((40, 340, 650))]
+        layout = layout_check._layout([title, *cards], W, H)
+        assert layout["margins"]["horizontal"] == 40.0
+
+
+class TestEmphasisAndRoles:
+    def test_a_featured_card_of_its_own_colour_is_meant(self):
+        cards = [card("a", 50, 140, 260, 300, z=1), card("b", 350, 125, 260, 330, z=2, colour="#DBEAFE"),
+                 card("c", 650, 140, 260, 300, z=3)]
+        assert "uneven_sizes" not in kinds(check(*cards))
+
+    def test_a_card_that_grew_by_accident_kept_its_colour(self):
+        cards = [card("a", 50, 140, 260, 300, z=1), card("b", 350, 140, 260, 330, z=2),
+                 card("c", 650, 140, 260, 300, z=3)]
+        assert "uneven_sizes" in kinds(check(*cards))
+
+    def test_the_shape_placed_differently_on_its_card_is_the_one_that_moves(self):
+        cards = [card("a", 50, 140, 260, 300, z=1), card("b", 350, 125, 260, 330, z=2, colour="#DBEAFE"),
+                 card("c", 650, 140, 260, 300, z=3)]
+        prices = [textbox("pa", 70, 202, 220, 50, z=4), textbox("pb", 370, 185, 220, 50, z=5),
+                  textbox("pc", 670, 200, 220, 50, z=6)]
+        [finding] = [f for f in check(*cards, *prices) if f["type"] == "misaligned"]
+        assert finding["shapes"][0] == "pa"
+
+
+class TestColumnsOfText:
+    def test_figures_that_label_nothing_are_spaced(self):
+        figures = [textbox(f"f{i}", 80, top, 220, 70, z=1 + i, text_height=58)
+                   for i, top in enumerate((130, 230, 342))]
+        [finding] = [f for f in check(*figures) if f["type"] == "uneven_spacing"]
+        assert finding["gaps_pt"] == [30.0, 42.0]
+
+    def test_a_big_figure_and_its_label_are_not_held_to_a_point(self):
+        figure = placed("figure", 80, 130, 220, 65.4, 87.2, 133.6, 100, 58.2)
+        label = placed("label", 320, 148, 500, 33.6, 327.2, 151.6, 220, 26.4, z=2)
+        assert "misaligned" not in kinds(check(figure, label))
+
+
+class TestRowsAndMargins:
+    def test_a_row_set_in_from_both_sides_keeps_its_ends(self):
+        title = placed("title", 40, 30, 880, 46, 47.2, 33.6, 200, 38.4)
+        groups = [card(f"g{i}", left, 170, 180, 136, z=2 + i)
+                  for i, left in enumerate((110, 390, 678))]
+        [finding] = [f for f in check(title, *groups) if f["type"] == "uneven_spacing"]
+        assert finding["fix"].startswith("ppt_distribute_shapes")
+
+
+class TestCollisionsInARow:
+    def test_a_subtitle_into_a_row_of_cards_is_one_finding_and_the_cards_move(self):
+        title = placed("title", 40, 30, 880, 46, 47.2, 33.6, 400, 38.4)
+        subtitle = placed("subtitle", 40, 82, 880, 55, 47.2, 85.6, 860, 48, z=2)
+        cards = [card(f"c{i}", 40 + 300 * i, 125, 280, 200, z=3 + i) for i in range(3)]
+        [finding] = [f for f in check(title, subtitle, *cards) if f["type"] == "overlap"]
+        assert finding["shapes"] == ["subtitle", "c0", "c1", "c2"]
+        assert finding["fix"].startswith("Move 'c0', 'c1', 'c2' down")
+
+
+class TestFindingTheTitle:
+    def test_the_topmost_large_text_is_the_title_not_the_biggest(self):
+        title = textbox("title", 40, 30, 880, 60, runs=[{"color_hex": "#222222", "size": 32.0, "bold": True}])
+        figure = textbox("figure", 80, 130, 220, 70, z=2,
+                         runs=[{"color_hex": "#2563EB", "size": 48.0, "bold": True}])
+        assert find_title(slide(title, figure), H) is title
+
+    def test_a_title_beside_a_photo_is_where_it_has_to_be(self):
+        def page(index):
+            words = [{"color_hex": "#222222", "size": 32.0, "bold": True}]
+            return slide(textbox(f"Title {index}", 40, 30, 880, 60, runs=words), index=index)
+        photo = card("photo", 0, 0, 440, 540, z=1, colour="#6B7280")
+        beside = textbox("Title 5", 480, 60, 440, 60, z=2,
+                         runs=[{"color_hex": "#222222", "size": 32.0, "bold": True}])
+        slides = [page(2), page(3), page(4), slide(photo, beside, index=5)]
+        assert deck_findings(slides, H, W) == []

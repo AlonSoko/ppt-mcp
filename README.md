@@ -298,7 +298,8 @@ Auto-fix strategies include widening text boxes and inserting soft returns.
 - **Misaligned** — edges a few points apart that were meant to line up
 - **Uneven spacing** — a row or column of like shapes with unequal gaps
 - **Uneven sizes** — like shapes in a row that are not one height, or in a column not one width
-- **Empty placeholders**, and, for the whole deck, **titles** that change size or position between slides with the same layout
+- **Sample text** — lorem ipsum, "Your title here", "[Company name]" or "XX%" left behind by a template or a draft
+- **Empty placeholders**, and, for the whole deck, **titles** that change size, position, weight, typeface or colour from slide to slide
 
 Each issue names the shapes and says how to fix it, with the tool call and its values. A fix keeps the slide together rather than only clearing the issue: a card grows with its padding and the rest of its row, and a shape brought back onto the slide keeps the slide's margin. The tools that add, move, resize, align, distribute or retext a shape also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it.
 
