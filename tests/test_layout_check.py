@@ -1547,7 +1547,7 @@ class FakeCollection:
 
 
 class TestReadingATemplatesGraphics:
-    def fake(self, shows=msoTrue, layout_shows=msoTrue):
+    def fake(self, shows=msoTrue, layout_shows=msoTrue, design=1, layout_index=2):
         band = fake_shape(name="Band")
         band.Type, band.Left, band.Width, band.HasTextFrame = msoAutoShape, 0.0, 70.0, msoFalse
         band.Fill = SimpleNamespace(Visible=msoTrue, Type=msoFillSolid,
@@ -1557,9 +1557,11 @@ class TestReadingATemplatesGraphics:
         title.PlaceholderFormat = SimpleNamespace(Type=1)
         panel = fake_shape(name="Panel")
         panel.Type, panel.HasTextFrame = msoAutoShape, msoFalse
-        layout = SimpleNamespace(DisplayMasterShapes=layout_shows, Shapes=FakeCollection([panel]))
+        layout = SimpleNamespace(DisplayMasterShapes=layout_shows, Shapes=FakeCollection([panel]),
+                                 Index=layout_index)
         master = SimpleNamespace(Shapes=FakeCollection([band, title]))
-        return SimpleNamespace(DisplayMasterShapes=shows, CustomLayout=layout, Master=master)
+        return SimpleNamespace(DisplayMasterShapes=shows, CustomLayout=layout, Master=master,
+                               Design=SimpleNamespace(Index=design))
 
     def test_the_master_and_layout_graphics_are_read_without_placeholders(self):
         graphics = layout_check._template_facts(self.fake())
@@ -1573,3 +1575,37 @@ class TestReadingATemplatesGraphics:
 
     def test_a_slide_hiding_background_graphics_has_none(self):
         assert layout_check._template_facts(self.fake(shows=msoFalse)) == []
+
+    def test_a_write_reads_only_the_graphics_near_what_it_touched(self):
+        # The band runs down the left edge; the touched text box is far right.
+        far = [textbox("note", 700, 100, 200, 30)]
+        graphics = layout_check._template_facts(self.fake(), touched=far)
+        band = next(g for g in graphics if g["name"] == "Band")
+        assert band["fill"] is None and band["left"] == 0.0
+        near = [textbox("note", 20, 100, 200, 30)]
+        graphics = layout_check._template_facts(self.fake(), touched=near)
+        assert next(g for g in graphics if g["name"] == "Band")["fill"]["visible"] is True
+
+    def test_a_whole_check_reads_each_layout_once(self):
+        cache = {}
+        first = layout_check._template_facts(self.fake(), cache=cache)
+        again = self.fake()
+        again.Master = None   # reading it again would fail
+        assert layout_check._template_facts(again, cache=cache) == first
+        other = layout_check._template_facts(self.fake(layout_index=3), cache=cache)
+        assert len(cache) == 2 and other is not first
+
+
+class TestAWritesUnreadGraphics:
+    def test_a_graphic_left_unread_still_blocks_a_move(self):
+        # A band across the slide; the note's text runs into its bottom edge,
+        # and the shortest way clear is down, onto a line of template text the
+        # write did not read, being far from what it touched.
+        band = graphic("band", 0, 280, 300, 30)
+        note = textbox("note", 100, 300, 200, 24)
+        unread = template_text("notice", 100, 330, 220, 18, text_width=140, text_height=15)
+        unread["text"] = None
+        [found] = overlaps(check_on([band, unread], note))
+        assert found["fix"].startswith("Move 'note' up by")
+        [found] = overlaps(check_on([band], note))
+        assert found["fix"].startswith("Move 'note' down by")

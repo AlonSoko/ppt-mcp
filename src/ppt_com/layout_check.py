@@ -1095,7 +1095,7 @@ def _template_collisions(slide_index, shapes, template, layout):
     not a shape here at all.
     """
     slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
-    graphics = []
+    graphics, obstacles = [], []
     for graphic in template or ():
         if not graphic.get("visible", True) or _is_line(graphic) or _turned(graphic):
             continue
@@ -1104,6 +1104,10 @@ def _template_collisions(slide_index, shapes, template, layout):
         ink = ink_box(graphic)
         if ink is not None:
             graphics.append((graphic, ink))
+        if ink is not None or graphic.get("text") is None:
+            # A graphic a write left unread, being far from what it touched,
+            # still stands where a fix might move something.
+            obstacles.append((graphic, ink or shape_box(graphic)))
     if not graphics:
         return []
     findings = []
@@ -1124,7 +1128,7 @@ def _template_collisions(slide_index, shapes, template, layout):
             hits.append((graphic, ink, width, height))
         if hits:
             findings.append(_template_collision_finding(slide_index, a, a_ink, hits, shapes,
-                                                        graphics, layout))
+                                                        obstacles, layout))
     return findings
 
 
@@ -2700,20 +2704,33 @@ def _background_hex(slide):
 _TEMPLATE_Z = -10_000
 
 
-def _template_facts(slide):
+def _template_facts(slide, touched=None, cache=None):
     """The graphics the slide's master and layout draw on it.
 
     A logo, a band down one side, a footer line: every slide made from the
     template has them, and the slide's own shapes have to keep clear of them.
     Placeholders are left out, since the slide has its own copies of those. The
     master's come first, being drawn first, and all of them below the slide's.
+
+    A write reads what it needs and no more: where every graphic is, and the
+    fill and text of those within reach of the shapes it touched, which are
+    ``touched``. A whole check reads a layout's graphics once: ``cache`` keeps
+    them by design and layout for the slides after.
     """
-    graphics = []
     try:
         if slide.DisplayMasterShapes != msoTrue:
-            return graphics
+            return []
     except Exception:
         logger.debug("Cannot tell whether the slide shows its template graphics", exc_info=True)
+    key = None
+    if cache is not None:
+        try:
+            key = (slide.Design.Index, slide.CustomLayout.Index)
+        except Exception:
+            key = None
+        if key in cache:
+            return cache[key]
+    graphics = []
     sources = []
     try:
         if slide.CustomLayout.DisplayMasterShapes == msoTrue:
@@ -2735,12 +2752,15 @@ def _template_facts(slide):
                 if shape.Type == msoPlaceholder:
                     continue
                 facts = _geometry_facts(shape, _TEMPLATE_Z + len(graphics))
-                _read_appearance(facts, shape, False)
+                if touched is None or within_reach(facts, touched):
+                    _read_appearance(facts, shape, False)
             except Exception:
                 logger.debug("Cannot read a %s graphic", source, exc_info=True)
                 continue
             facts["source"] = source
             graphics.append(facts)
+    if key is not None:
+        cache[key] = graphics
     return graphics
 
 
@@ -2758,6 +2778,7 @@ def _slide_facts_impl(slide_indices, navigate, detail):
         "slide_height": pres.PageSetup.SlideHeight,
         "slides": [],
     }
+    template_cache = {} if detail is None else None
     for slide_index in slide_indices:
         if slide_index < 1 or slide_index > total:
             raise ValueError(
@@ -2773,6 +2794,7 @@ def _slide_facts_impl(slide_indices, navigate, detail):
             layout = None
         refs = [slide.Shapes(z) for z in range(1, slide.Shapes.Count + 1)]
         shapes = read_shapes(refs, _geometry_facts, _read_appearance, detail)
+        touched = None if detail is None else [s for s in shapes if s["name"] in detail]
         try:
             follows = slide.FollowMasterBackground == msoTrue
         except Exception:
@@ -2784,7 +2806,7 @@ def _slide_facts_impl(slide_indices, navigate, detail):
                 _background_hex(slide) if needs_background(shapes, detail) else None
             ),
             "follows_background": follows,
-            "template": _template_facts(slide),
+            "template": _template_facts(slide, touched, template_cache),
             "shapes": shapes,
         })
     return facts

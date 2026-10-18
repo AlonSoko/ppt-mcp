@@ -295,7 +295,7 @@ def _background_hex(slide, follows_master):
     return None
 
 
-def _template_facts(slide, shows, cache):
+def _template_facts(slide, shows, cache, touched=None):
     """The macOS half of ppt_com.layout_check._template_facts.
 
     Only the master's graphics can be read here: PowerPoint for Mac answers no
@@ -305,8 +305,11 @@ def _template_facts(slide, shows, cache):
     its placeholders.
 
     Most slides of a deck share one master, so a graphic's fill and text are
-    read once per call: ``cache`` holds them by name and position.
+    read once per call: ``cache`` holds them by name and position. A write
+    reads them only for the graphics within reach of the shapes it touched,
+    ``touched``, as on Windows.
     """
+    from ppt_com.layout_check import within_reach
     from ppt_com.layout_check import _TEMPLATE_Z
 
     if shows is False:
@@ -330,7 +333,8 @@ def _template_facts(slide, shows, cache):
             continue
         key = (facts["name"], facts["left"], facts["top"], facts["width"], facts["height"])
         if key not in cache:
-            _read_appearance(facts, ref, False)
+            if touched is None or within_reach(facts, touched):
+                _read_appearance(facts, ref, False)
             facts.pop("_has_text_frame", None)
             facts["source"] = "master"
             cache[key] = facts
@@ -395,7 +399,8 @@ def _slide_facts_impl(slide_indices, navigate, detail):
             ),
             "follows_background": None if follows is None else bool(follows),
             "template": _template_facts(
-                slide, None if shows is None else bool(shows), template_cache),
+                slide, None if shows is None else bool(shows), template_cache,
+                None if detail is None else [s for s in shapes if s["name"] in detail]),
             "shapes": shapes,
         })
     return facts
