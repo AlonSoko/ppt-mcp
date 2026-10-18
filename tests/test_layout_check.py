@@ -639,13 +639,49 @@ def facts(*shapes):
     return {"slide_width": W, "slide_height": H, "slides": [slide(*shapes)]}
 
 
+class FakeDeck:
+    """PowerPoint answering a deck check: a slide count, then one slide per call."""
+
+    def __init__(self, slides):
+        self.slides = slides
+        self.calls = []
+
+    def execute(self, func, *args):
+        self.calls.append((func.__name__, args))
+        if func.__name__ == "_slide_count_impl":
+            return len(self.slides)
+        return {"slide_width": W, "slide_height": H,
+                "slides": [self.slides[i - 1] for i in args[0]]}
+
+
+class TestCheckingADeck:
+    def test_a_deck_is_read_a_slide_per_call_with_one_template_cache(self, monkeypatch):
+        pages = [slide(card("c", 10, 10, 50, 50), index=i) for i in (1, 2, 3)]
+        fake = FakeDeck(pages)
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = json.loads(layout_check.check_layout(layout_check.CheckLayoutInput()))
+        assert result["slides_checked"] == 3
+        reads = [args for name, args in fake.calls if name == "_slide_facts_impl"]
+        assert [args[0] for args in reads] == [[1], [2], [3]]
+        # Not navigated, read in full, and every call shares one cache.
+        assert all(args[1] is False and args[2] is None for args in reads)
+        assert len({id(args[3]) for args in reads}) == 1
+
+    def test_one_slide_is_navigated_to(self, monkeypatch):
+        fake = FakeDeck([slide(card("c", 10, 10, 50, 50))])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        layout_check.check_layout(layout_check.CheckLayoutInput(slide_index=1))
+        [read] = [args for name, args in fake.calls if name == "_slide_facts_impl"]
+        assert read[0] == [1] and read[1] is True
+
+
 class TestReportLayout:
     def test_a_problem_is_added_to_the_result(self, monkeypatch):
         fake = FakePpt(facts(card("c", 900, 100, 100, 50)))
         monkeypatch.setattr(layout_check, "ppt", fake)
         result = report_layout({"shape_name": "c"}, 1, ["c"])
         assert kinds(result["layout_issues"]) == ["off_slide"]
-        assert fake.calls == [("_slide_facts_impl", ([1], False, ["c"]))]
+        assert fake.calls == [("_slide_facts_impl", ([1], False, ["c"], None))]
 
     def test_nothing_is_added_when_nothing_is_wrong(self, monkeypatch):
         monkeypatch.setattr(layout_check, "ppt", FakePpt(facts(card("c", 10, 10, 50, 50))))
@@ -1033,6 +1069,78 @@ class TestACompanyTemplateDeck:
         deck = recorded("companydeck_fixed_mac")
         assert all(found == [] for found in findings_by_slide(deck).values())
         assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
+
+
+class TestACompanyTemplateDeckOnWindows:
+    # The company-style template again, built on Windows through layouts
+    # picked by name ("Acme Content", "Acme Section"), with a photo, icons and
+    # one more mistake: a mail icon dropped on the logo.
+    SEEN = {
+        1: [], 2: [], 3: [],
+        4: [("overlap", "Chart 2")],                    # a chart over the logo and the line
+        5: [("overlap", "TextBox 11")],                 # a footnote on the confidentiality line
+        6: [], 7: [], 8: [],
+        9: [("overlap", "TextBox 3")],                  # a contact line on the logo
+        10: [],
+        11: [("overlap", "Graphic 15")],                # an icon on the logo; white text on the photo is fine
+    }
+
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("companydeck_broken_win")) == self.SEEN
+
+    def test_the_fixes_say_what_was_done(self):
+        fixes = fixes_of(recorded("companydeck_broken_win"))
+        assert fixes[(4, "overlap")].startswith("Make 'Chart 2' 394 pt tall")
+        assert fixes[(5, "overlap")].startswith("Move 'TextBox 11' up by 13 pt")
+        assert fixes[(11, "overlap")].startswith("Move 'Graphic 15' up by 16 pt")
+
+    def test_only_the_hand_drawn_title_is_odd_and_the_fixed_deck_is_clean(self):
+        deck = recorded("companydeck_broken_win")
+        found = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert found and all(f["slides"] == [7] for f in found)
+        fixed = recorded("companydeck_fixed_win")
+        assert all(found == [] for found in findings_by_slide(fixed).values())
+        assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+
+
+class TestAThemedDeckOnWindows:
+    # PowerPoint's Retrospect theme on Windows, where a layout's own graphics
+    # can be read: a footer band and a line above it on the master, and a dark
+    # panel down the left of the caption layout, a band under the picture one.
+    SEEN = {
+        1: [], 2: [], 3: [],
+        4: [("overlap", "Chart 2")],                    # a chart into the footer band
+        5: [],                                          # white caption text on the layout's panel
+        6: [("low_contrast", "TextBox 3")],             # a grey note on the footer band
+        7: [],                                          # picture layout, its own band
+        8: [("overlap", "Rounded Rectangle 2"),         # a card into the band
+            ("narrow_margin", "Rounded Rectangle 2")],  # and 5 pt past the margin
+    }
+
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("retrodeck_broken_win")) == self.SEEN
+
+    def test_the_layouts_own_panel_is_read(self):
+        deck = recorded("retrodeck_broken_win")
+        caption = deck["slides"][4]
+        assert any(g["source"] == "layout" and g["width"] > 300 for g in caption["template"])
+
+    def test_text_put_on_the_band_is_moved_off_it_before_it_is_recoloured(self):
+        deck = recorded("retrodeck_broken_win")
+        [found] = slide_findings(deck["slides"][5], deck["slide_width"], deck["slide_height"])
+        assert "It sits on 'Rectangle 6', part of the template." in found["message"]
+        # The thin line on top of the band is part of it: clear of both.
+        assert found["fix"].startswith("Move 'TextBox 3' up by 33.2 pt")
+        assert "'Rectangle 6' and 'Rectangle 8'" in found["fix"]
+        assert "Or make the text #000000" in found["fix"]
+
+    def test_the_hand_drawn_title_is_odd_and_the_fixed_deck_is_clean(self):
+        deck = recorded("retrodeck_broken_win")
+        found = deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"])
+        assert len(found) == 5 and all(f["slides"] == [8] for f in found)
+        fixed = recorded("retrodeck_fixed_win")
+        assert all(found == [] for found in findings_by_slide(fixed).values())
+        assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
 # ---------------------------------------------------------------------------

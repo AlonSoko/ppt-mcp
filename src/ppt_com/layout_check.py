@@ -1268,6 +1268,21 @@ def _template_move(a, a_ink, union, named, shapes, graphics, layout):
             elif _belongs_to(a, s, boxes):
                 holders.add(s["name"])
     skip = {a["name"]} | {s["name"] for s in carried} | holders
+    # A band is often more than one shape: a thin line on top of it, a strip
+    # beside it. Clear of the band means clear of what touches it too.
+    grown = True
+    while grown:
+        grown = False
+        for graphic, ink in graphics:
+            reach = (union[0] - _CLEARANCE, union[1] - _CLEARANCE,
+                     union[2] + _CLEARANCE, union[3] + _CLEARANCE)
+            w, h = _shared(reach, ink)
+            if w > 0 and h > 0 and not _inside(ink, union):
+                union = (min(union[0], ink[0]), min(union[1], ink[1]),
+                         max(union[2], ink[2]), max(union[3], ink[3]))
+                if f"'{graphic['name']}'" not in named:
+                    named = f"{named} and '{graphic['name']}'"
+                grown = True
 
     def lands_clear(field, by):
         dx, dy = (by, 0.0) if field == "left" else (0.0, by)
@@ -1344,9 +1359,10 @@ def _backdrop(shape, shapes, background_hex, template=()):
     The shape's own fill when it has a solid one, otherwise the nearest shape
     underneath that holds the whole of the text and paints something, then a
     graphic of the template's that does, and otherwise the slide's background.
-    What paints it is "fill", "shape", "template" or "background". A picture,
-    a gradient or a see-through fill in the way means the colour is not one
-    colour, so the colour is None.
+    What paints it is "fill", "shape", "template" or "background", and the
+    shape or graphic that does, when one does. A picture, a gradient or a
+    see-through fill in the way means the colour is not one colour, so the
+    colour is None.
     """
     def solid(fill):
         if not fill or not fill.get("visible"):
@@ -1357,10 +1373,10 @@ def _backdrop(shape, shapes, background_hex, template=()):
 
     painted, colour = solid(shape.get("fill"))
     if painted:
-        return colour, "fill"
+        return colour, "fill", shape
     words = text_box(shape)
     if words is None:
-        return None, None
+        return None, None, None
     below = [s for s in shapes if s.get("z", 0) < shape.get("z", 0)]
     for source, candidates in (("shape", below), ("template", list(template or ()))):
         for other in sorted(candidates, key=lambda s: s.get("z", 0), reverse=True):
@@ -1369,11 +1385,11 @@ def _backdrop(shape, shapes, background_hex, template=()):
             if not _inside(words, shape_box(other)):
                 continue
             if other["type"] in _UNKNOWN_BACKDROP_TYPES:
-                return None, source
+                return None, source, other
             painted, colour = solid(other.get("fill"))
             if painted:
-                return colour, source
-    return background_hex, "background"
+                return colour, source, other
+    return background_hex, "background", None
 
 
 def _backdrop_colour(shape, shapes, background_hex, template=()):
@@ -1406,7 +1422,8 @@ def _as_designed(shape, source, follows_background) -> bool:
     return bool(runs) and all(run.get("theme") for run in runs)
 
 
-def _low_contrast(slide_index, shapes, background_hex, template=(), follows_background=None):
+def _low_contrast(slide_index, shapes, background_hex, template=(), follows_background=None,
+                  layout=None):
     from ppt_com.themes import _contrast_ratio
 
     findings = []
@@ -1414,8 +1431,8 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         text = shape.get("text")
         if not shape.get("visible", True) or not text or not text.get("chars"):
             continue
-        backdrop, source = _backdrop(shape, shapes, background_hex, template)
-        if not backdrop or _as_designed(shape, source, follows_background):
+        backdrop, painted_by, painter = _backdrop(shape, shapes, background_hex, template)
+        if not backdrop or _as_designed(shape, painted_by, follows_background):
             continue
         worst = None
         for run in text.get("runs") or []:
@@ -1441,14 +1458,29 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         else:
             dark, light = _contrast_ratio("#000000", backdrop), _contrast_ratio("#FFFFFF", backdrop)
             suggestion, source = ("#000000" if dark >= light else "#FFFFFF"), ""
+        recolour = (f"make the text {suggestion}{source} (contrast "
+                    f"{_contrast_ratio(suggestion, backdrop):.1f}:1): ppt_format_text "
+                    f"color='{suggestion}'")
+        on = ""
+        fix = f"{recolour[0].upper()}{recolour[1:]}. Or change what is behind it."
+        if painted_by == "template" and painter is not None:
+            # Text the caller put on a band or panel of the template's: the
+            # template keeps that place for itself, so off it is the better fix.
+            on = f" It sits on '{painter['name']}', part of the template."
+            move = None
+            if layout is not None and shape.get("placeholder_type") is None:
+                obstacles = [(g, ink_box(g) or shape_box(g)) for g in template or ()
+                             if g.get("visible", True) and not _is_line(g)
+                             and not _is_backdrop(g, layout.get("slide_width"), layout.get("slide_height"))]
+                move = _template_move(shape, text_box(shape), shape_box(painter),
+                                      f"'{painter['name']}'", shapes, obstacles, layout)
+            if move:
+                fix = f"{move[:-1]}. Or {recolour}."
         findings.append(_finding(
             slide_index, "low_contrast", [name],
             f"Text in '{name}' is {colour} on {backdrop}, a contrast of "
-            f"{ratio:.1f}:1 where {needed:g}:1 is the minimum for its size.",
-            f"Make the text {suggestion}{source} (contrast "
-            f"{_contrast_ratio(suggestion, backdrop):.1f}:1): ppt_format_text "
-            f"color='{suggestion}'. Or change what is behind it.",
-            text_color=colour, backdrop_color=backdrop,
+            f"{ratio:.1f}:1 where {needed:g}:1 is the minimum for its size.{on}",
+            fix, text_color=colour, backdrop_color=backdrop,
             contrast=round(ratio, 2), minimum=needed,
         ))
     return findings
@@ -2088,7 +2120,7 @@ def slide_findings(slide, slide_w, slide_h, only=None):
         + _overlap(index, shapes, layout)
         + _template_collisions(index, shapes, template, layout)
         + _low_contrast(index, shapes, slide.get("background_hex"), template,
-                        slide.get("follows_background"))
+                        slide.get("follows_background"), layout)
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
@@ -2764,11 +2796,13 @@ def _template_facts(slide, touched=None, cache=None):
     return graphics
 
 
-def _slide_facts_impl(slide_indices, navigate, detail):
+def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     """Read the slides into the plain dicts the checks work on.
 
     ``detail`` is None to read every shape in full, or the names of the
-    shapes a write touched; see ``read_shapes``.
+    shapes a write touched; see ``read_shapes``. ``template_cache`` carries the
+    template graphics already read from one call to the next, when a deck is
+    read a slide at a time.
     """
     app = ppt._get_app_impl()
     pres = ppt._get_pres_impl()
@@ -2778,7 +2812,10 @@ def _slide_facts_impl(slide_indices, navigate, detail):
         "slide_height": pres.PageSetup.SlideHeight,
         "slides": [],
     }
-    template_cache = {} if detail is None else None
+    if detail is not None:
+        template_cache = None
+    elif template_cache is None:
+        template_cache = {}
     for slide_index in slide_indices:
         if slide_index < 1 or slide_index > total:
             raise ValueError(
@@ -2825,17 +2862,23 @@ def check_layout(params: CheckLayoutInput) -> str:
             indices = [params.slide_index]
         else:
             indices = list(range(1, ppt.execute(_slide_count_impl) + 1))
-        facts = ppt.execute(_slide_facts_impl, indices, len(indices) == 1, None)
+        # A slide per call. PowerPoint is given a fixed time for each call, and
+        # a long deck read in one, on a slow machine, can run past it; a slide
+        # never does. The template graphics read on one slide serve the next.
+        cache, slides, facts = {}, [], None
+        for index in indices:
+            facts = ppt.execute(_slide_facts_impl, [index], len(indices) == 1, None, cache)
+            slides += facts["slides"]
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
         findings = []
-        for slide in facts["slides"]:
+        for slide in slides:
             findings += slide_findings(slide, slide_w, slide_h)
         if params.slide_index is None:
-            findings += deck_findings(facts["slides"], slide_h, slide_w)
+            findings += deck_findings(slides, slide_h, slide_w)
         result = {
             "issues": findings,
             "total": len(findings),
-            "slides_checked": len(facts["slides"]),
+            "slides_checked": len(slides),
         }
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
@@ -2854,7 +2897,7 @@ def report_layout(result: dict, slide_index: int, shape_names) -> dict:
     if not names or not isinstance(result, dict) or "error" in result:
         return result
     try:
-        facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names))
+        facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names), None)
         slide = facts["slides"][0]
         issues = slide_findings(
             slide, facts["slide_width"], facts["slide_height"], only=names,

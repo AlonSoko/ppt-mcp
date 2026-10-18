@@ -355,7 +355,7 @@ def _layout_name(word):
     return name[len("slide layout "):] if name.startswith("slide layout ") else name
 
 
-def _slide_facts_impl(slide_indices, navigate, detail):
+def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     from ppt_com.layout_check import needs_background, read_shapes
     from ppt_mac.layout import _slide_dimensions
 
@@ -363,7 +363,9 @@ def _slide_facts_impl(slide_indices, navigate, detail):
     pres = ppt._get_pres_impl()
     slide_w, slide_h = _slide_dimensions(pres)
     facts = {"slide_width": slide_w, "slide_height": slide_h, "slides": []}
-    template_cache = {}
+    # Carried between calls only for a whole read, never a write's partial one.
+    if detail is not None or template_cache is None:
+        template_cache = {}
     for slide_index in slide_indices:
         slide = _slide(pres, slide_index)
         if navigate:
