@@ -2416,9 +2416,13 @@ def _cramped_text(slide_index, layout):
     The text does not cross the edge, so nothing overlaps, but it has next to
     no room on one side and plenty on the other, and reads as cut off. A card
     grown by exactly as much as its text overflowed leaves it just like this.
+
+    The text on a card is judged as one block: a quote with its attribution
+    under it, centred together, has its room above the quote and below the
+    attribution, not above each line.
     """
     boxes = layout["boxes"]
-    findings = []
+    on_card = {}
     for shape in layout["arranged"]:
         if paints_box(shape):
             # Text in a shape's own frame is inset by the frame's margins, and
@@ -2426,9 +2430,13 @@ def _cramped_text(slide_index, layout):
             continue
         words = text_box(shape)
         card = _card_of(shape, layout) if words else None
-        if card is None:
-            continue
-        room = _room(words, boxes[card["name"]])
+        if card is not None:
+            on_card.setdefault(card["name"], (card, []))[1].append((shape, words))
+    findings = []
+    for card_name, (card, texts) in on_card.items():
+        block = (min(w[0] for _, w in texts), min(w[1] for _, w in texts),
+                 max(w[2] for _, w in texts), max(w[3] for _, w in texts))
+        room = _room(block, boxes[card_name])
         if min(room.values()) < -_EDGE_TOLERANCE:
             continue  # It runs past the edge, which overlap reports.
         for side in ("bottom", "top", "right", "left"):
@@ -2436,23 +2444,33 @@ def _cramped_text(slide_index, layout):
             have = max(room[side], 0.0)
             if have >= _MIN_ROOM or have >= 0.5 * want:
                 continue
-            name, card_name, short = shape["name"], card["name"], want - have
+            # Named after the text that sets the block's edge on that side.
+            name = next(s["name"] for s, w in texts
+                        if abs(_room(w, boxes[card_name])[side] - room[side]) <= 0.05)
+            names, short = [s["name"] for s, _ in texts], want - have
+            moved = (f"'{name}'" if len(names) == 1
+                     else f"the text on '{card_name}' ({', '.join(repr(n) for n in names)})")
+            call = "" if len(names) == 1 else f"shape_names={names} "
             if side == "bottom":
                 fix = _grow(card, "bottom", short, layout)
             elif side == "top":
-                fix = f"move '{name}' down by {_pt(short)} (ppt_update_shape dtop={_num(short)})"
+                fix = f"move {moved} down by {_pt(short)} (ppt_update_shape {call}dtop={_num(short)})"
                 if room["bottom"] - short < want:
                     fix += f", and {_grow(card, 'bottom', want - room['bottom'] + short, layout)}"
             elif side == "left":
-                fix = f"move '{name}' right by {_pt(short)} (ppt_update_shape dleft={_num(short)})"
+                fix = f"move {moved} right by {_pt(short)} (ppt_update_shape {call}dleft={_num(short)})"
             else:
                 fix = (f"make '{name}' {_pt(short)} narrower so its lines wrap "
                        f"sooner (ppt_update_shape dwidth={_num(-short)}), or "
                        f"{_grow(card, 'right', short, layout)}")
             opposite = _OPPOSITE[side]
+            others = [n for n in names if n != name]
+            text = (f"The text of '{name}' is" if not others else
+                    f"The text of '{name}', set with {', '.join(repr(n) for n in others)} "
+                    "as one block, is")
             findings.append(_finding(
-                slide_index, "cramped_text", [name, card_name],
-                f"The text of '{name}' is {_pt(have)} from the {side} edge of "
+                slide_index, "cramped_text", [name, *others, card_name],
+                f"{text} {_pt(have)} from the {side} edge of "
                 f"'{card_name}', with {_pt(room[opposite])} {_WHERE[opposite]}, "
                 "so it looks pressed against the edge.",
                 f"{fix[0].upper()}{fix[1:]}, which leaves it {_pt(want)} "

@@ -496,6 +496,30 @@ class TestCrampedText:
         [finding] = [f for f in found if f["type"] == "cramped_text"]
         assert "Move 'words' down by 19 pt (ppt_update_shape dtop=19)" in finding["fix"]
 
+    def test_a_quote_and_its_attribution_are_padded_as_one_block(self):
+        # Live: a band with a quote and its source centred together under it.
+        found = check(card("band", 60, 400, 840, 64, z=1),
+                      textbox("quote", 80, 409, 800, 28, z=2, text_width=786, text_height=22),
+                      textbox("source", 80, 437, 800, 20, z=3, text_width=786, text_height=14.4))
+        assert "cramped_text" not in kinds(found)
+
+    def test_a_block_pressed_against_the_bottom_names_its_last_line(self):
+        found = check(card("card", 100, 100, 300, 200, z=1),
+                      textbox("head", 112.8, 116.4, 280, 40, z=2, text_width=270, text_height=30),
+                      textbox("body", 112.8, 150, 280, 150, z=3, text_width=270, text_height=145.4))
+        [finding] = [f for f in found if f["type"] == "cramped_text"]
+        assert finding["shapes"] == ["body", "head", "card"]
+        assert "'body', set with 'head' as one block, is 1 pt from the bottom edge" in finding["message"]
+        assert "with 20 pt above" in finding["message"]
+
+    def test_a_block_at_the_top_edge_moves_down_together(self):
+        found = check(card("card", 100, 100, 300, 200, z=1),
+                      textbox("head", 112.8, 97.4, 280, 30, z=2, text_width=200, text_height=24),
+                      textbox("body", 112.8, 124, 280, 40, z=3, text_width=200, text_height=30))
+        [finding] = [f for f in found if f["type"] == "cramped_text"]
+        assert "Move the text on 'card' ('head', 'body') down by 19 pt " \
+               "(ppt_update_shape shape_names=['head', 'body'] dtop=19)" in finding["fix"]
+
     def test_little_room_all_round_is_a_badge(self):
         found = check(card("pill", 100, 100, 80, 24, z=1),
                       textbox("label", 95.8, 99.4, 88.4, 25.2, z=2,
