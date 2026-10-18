@@ -74,6 +74,24 @@ _SIMILAR_SIZE = 0.15
 # fraction of the smaller one's height (or width).
 _SHARED_SPAN = 0.5
 
+# Like shapes in a row whose heights (or in a column, widths) are this close
+# are the same size.
+_SIZE_TOLERANCE = 2.0
+
+# Text closer than this to an edge of the card it sits on is pressed against
+# it, when it has twice as much room the other way. Equally little room all
+# round is a badge or a pill, and is meant.
+_MIN_ROOM = 6.0
+
+# A slide's side margin is the distance most of its shapes keep from the left
+# and right edges. Only distances within this share of the slide's width
+# count; a shape further in is placed, not kept to a margin.
+_MARGIN_ZONE = 0.2
+
+# Margins this close are one margin, and a shape further inside it than this
+# is not keeping it.
+_MARGIN_TOLERANCE = 2.0
+
 # A shape covering this much of the slide is a backdrop, not part of the
 # layout. It is not lined up against anything and it does not make the shapes
 # on it its children.
@@ -132,13 +150,15 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 # describe a slide or a deck rather than one shape, and a slide being built is
 # allowed to be unfinished, so those wait for ppt_check_layout.
 SHAPE_FINDINGS = frozenset({
-    "off_slide", "overflow", "overlap", "low_contrast", "misaligned",
+    "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
+    "narrow_margin", "misaligned", "uneven_sizes",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
-    "off_slide", "overflow", "overlap", "low_contrast", "misaligned",
-    "uneven_spacing", "empty_placeholder", "inconsistent_titles",
+    "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
+    "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
+    "empty_placeholder", "inconsistent_titles",
 )
 
 
@@ -335,6 +355,232 @@ def _arranged(shapes, slide_w, slide_h):
 
 
 # ---------------------------------------------------------------------------
+# How a slide is put together: what sits on what, rows, margins
+# ---------------------------------------------------------------------------
+def _num(value) -> str:
+    """A number of points as a tool call takes it: 640, 219.2."""
+    return f"{round(value, 2):g}"
+
+
+def _belongs_to(s, other, boxes) -> bool:
+    """Whether ``s`` sits on ``other``, the way text sits on a card.
+
+    Mostly inside, rather than wholly: the text on a card still belongs to the
+    card when it runs past its edge, which is its own finding. A text box set
+    to grow with its text can end up with a larger frame than the card it is
+    on, so a frame that only holds text belongs to a shape that paints, at any
+    size.
+    """
+    mine, theirs = boxes[s["name"]], boxes[other["name"]]
+    width, height = _shared(mine, theirs)
+    if width * height < 0.5 * _width(mine) * _height(mine):
+        return False
+    if paints_box(s) != paints_box(other):
+        # Never the other way round: a card is not inside a text frame.
+        return paints_box(other)
+    return _width(theirs) * _height(theirs) > _width(mine) * _height(mine)
+
+
+def _depths(arranged, boxes):
+    """How many shapes each one sits on: none for a card, one for its text."""
+    return {
+        s["name"]: sum(
+            1 for other in arranged
+            if other is not s and _belongs_to(s, other, boxes)
+        )
+        for s in arranged
+    }
+
+
+def _similar(a_box, b_box) -> bool:
+    """Whether two boxes are about one size, in both directions."""
+    aw, ah, bw, bh = _width(a_box), _height(a_box), _width(b_box), _height(b_box)
+    return (abs(aw - bw) <= _SIMILAR_SIZE * max(aw, bw)
+            and abs(ah - bh) <= _SIMILAR_SIZE * max(ah, bh))
+
+
+def _like_groups(members, boxes):
+    """Rows and columns of like shapes among ``members``, two or more each.
+
+    Shapes are alike when their widths and heights are within
+    ``_SIMILAR_SIZE`` of each other. A row shares its height and runs left to
+    right, a column shares its width and runs down, and each comes sorted that
+    way, as ``("horizontal", row)`` or ``("vertical", column)``.
+    """
+    groups = []
+    for axis, direction, start in (("y", "horizontal", 0), ("x", "vertical", 1)):
+        def joined(a, b, axis=axis):
+            a_box, b_box = boxes[a["name"]], boxes[b["name"]]
+            return _similar(a_box, b_box) and _related(a_box, b_box, axis)
+
+        for group in _connected(members, joined):
+            if len(group) >= 2:
+                group.sort(key=lambda s, start=start: boxes[s["name"]][start])
+                groups.append((direction, group))
+    return groups
+
+
+def _margins(arranged, boxes, depth, slide_w, slide_h):
+    """The margins the slide's shapes keep from its edges, or None.
+
+    The side margin is the distance most of the top level shapes near the left
+    and right edges keep from them, and at least two edges have to agree on
+    it. A slide keeps the same margin on both sides. A shape touching an edge
+    bleeds off it on purpose and keeps no margin, so it does not count.
+
+    A title and a footer rarely keep the same distance from the top and the
+    bottom, so the margin there is the one the topmost shape keeps, usually
+    the title, and no more than the side margin.
+    """
+    if not slide_w or not slide_h:
+        return None
+    sides, tops = [], []
+    for shape in arranged:
+        if depth[shape["name"]]:
+            continue
+        box = boxes[shape["name"]]
+        for distance in (box[0], slide_w - box[2]):
+            if _EDGE_TOLERANCE < distance < _MARGIN_ZONE * slide_w:
+                sides.append((shape["name"], distance))
+        if _EDGE_TOLERANCE < box[1] < _MARGIN_ZONE * slide_h:
+            tops.append(box[1])
+    groups = _clusters(sides, _MARGIN_TOLERANCE)
+    if not groups or len(groups[0]) < 2:
+        return None
+    usual = sorted(distance for _, distance in groups[0])
+    side = round(usual[len(usual) // 2], 1)
+    return {"horizontal": side, "vertical": round(min([side] + tops), 1)}
+
+
+def _layout(shapes, slide_w, slide_h):
+    """What the checks on how a slide is put together share.
+
+    The shapes that make up the layout and their boxes, how many shapes each
+    sits on, the rows and columns of like shapes, and the slide's margins.
+    ``groups`` are the top level ones, which are spaced and kept to the
+    margins. ``rows`` and ``columns`` map each shape that paints to the like
+    shapes beside it on its own level, which are kept one size.
+    """
+    arranged = _arranged(shapes, slide_w, slide_h)
+    boxes = {s["name"]: shape_box(s) for s in arranged}
+    depth = _depths(arranged, boxes)
+    rows, columns = {}, {}
+    for level in sorted(set(depth.values())):
+        painted = [s for s in arranged if depth[s["name"]] == level and paints_box(s)]
+        for direction, group in _like_groups(painted, boxes):
+            names = [s["name"] for s in group]
+            for name in names:
+                (rows if direction == "horizontal" else columns)[name] = names
+    top = [s for s in arranged if depth[s["name"]] == 0]
+    return {
+        "arranged": arranged, "boxes": boxes, "depth": depth,
+        "groups": _like_groups(top, boxes), "rows": rows, "columns": columns,
+        "margins": _margins(arranged, boxes, depth, slide_w, slide_h),
+    }
+
+
+def _spans(row, boxes, slide_w) -> bool:
+    """Whether a row reaches across to both sides, as a row of cards under a
+    title does, rather than sitting somewhere on the slide."""
+    zone = _MARGIN_ZONE * slide_w
+    return boxes[row[0]["name"]][0] < zone and slide_w - boxes[row[-1]["name"]][2] < zone
+
+
+def _row_fix(row, boxes, slide_w, margin):
+    """The fix that spreads ``row`` evenly between the side margins, or None
+    when it is already there or too wide to fit."""
+    widths = [_width(boxes[s["name"]]) for s in row]
+    room = slide_w - 2 * margin - sum(widths)
+    if room <= 0:
+        return None
+    gap = room / (len(row) - 1)
+    moves, x = [], margin
+    for shape, width in zip(row, widths, strict=True):
+        if abs(boxes[shape["name"]][0] - x) > 0.05:
+            moves.append(f"of '{shape['name']}' to {_pt(x)}")
+        x += width + gap
+    if not moves:
+        return None
+    return (f"Set left {' and '.join(moves)} (ppt_update_shape). Every gap is "
+            f"then {_pt(gap)}, and the row keeps the {_pt(margin)} side "
+            f"margins the rest of the slide keeps.")
+
+
+_OPPOSITE = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}
+_WHERE = {"top": "above", "bottom": "below", "left": "on the left", "right": "on the right"}
+
+
+def _room(words, card):
+    """How far text is from each edge of the card it sits on, negative past it."""
+    return {
+        "top": words[1] - card[1], "bottom": card[3] - words[3],
+        "left": words[0] - card[0], "right": card[2] - words[2],
+    }
+
+
+def _wanted_room(room, side):
+    """The room text should have on ``side`` of its card.
+
+    What it has on the opposite side, the way a card is padded evenly, but no
+    more than it has on the closer of the other two, so text set at the top
+    of a tall card is not told to move to the middle of it. The closer one,
+    because ragged lines leave more room on their own side than the card was
+    padded with.
+    """
+    across = ("left", "right") if side in ("top", "bottom") else ("top", "bottom")
+    return max(0.0, min(room[_OPPOSITE[side]], min(room[s] for s in across)))
+
+
+def _padding(room, side, want) -> str:
+    """Why the room asked for is that much: ', as it has above', when it is."""
+    if abs(room[_OPPOSITE[side]] - want) <= 0.05:
+        return f", as it has {_WHERE[_OPPOSITE[side]]}"
+    return ""
+
+
+def _card_of(shape, layout):
+    """The shape that paints under this one's text, the innermost when they
+    nest, or None."""
+    boxes = layout["boxes"]
+    if shape["name"] not in boxes:
+        return None
+    cards = [other for other in layout["arranged"]
+             if other is not shape and paints_box(other)
+             and _belongs_to(shape, other, boxes)]
+    if not cards:
+        return None
+    return min(cards, key=lambda c: _width(boxes[c["name"]]) * _height(boxes[c["name"]]))
+
+
+def _grow(card, side, amount, layout):
+    """The fix that gives ``card`` ``amount`` more room on ``side``.
+
+    The rest of its row grows with it when the room is height, and the rest
+    of its column when it is width, so like cards stay one size.
+    """
+    name, box = card["name"], layout["boxes"][card["name"]]
+    if side in ("top", "bottom"):
+        word, group = "taller", "row"
+        call = f"height={_num(_height(box) + amount)}"
+        mates = layout["rows"].get(name, [])
+    else:
+        word, group = "wider", "column"
+        call = f"width={_num(_width(box) + amount)}"
+        mates = layout["columns"].get(name, [])
+    if side == "top":
+        call += f" top={_num(box[1] - amount)}"
+    elif side == "left":
+        call += f" left={_num(box[0] - amount)}"
+    others = [m for m in mates if m != name]
+    if not others:
+        return f"make '{name}' {_pt(amount)} {word} (ppt_update_shape {call})"
+    listed = ", ".join(f"'{m}'" for m in others)
+    return (f"make '{name}' {_pt(amount)} {word}, and {listed} with it so the "
+            f"{group} stays one size (ppt_update_shape shape_names="
+            f"{[name] + others} {call})")
+
+
+# ---------------------------------------------------------------------------
 # Per shape findings
 # ---------------------------------------------------------------------------
 def _finding(slide_index, kind, shapes, message, fix, severity="error", **extra):
@@ -350,15 +596,20 @@ def _finding(slide_index, kind, shapes, message, fix, severity="error", **extra)
     return finding
 
 
-def _off_slide(slide_index, shapes, slide_w, slide_h):
+def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
     """Shapes, or the text of shapes, that reach past an edge of the slide.
 
     Measured on what is drawn. A text box whose frame hangs over the edge with
     its text well inside is not wrong, and a box that fits on the slide with
     its text spilling off the bottom is.
+
+    The fix brings the shape back inside the margin the rest of the slide
+    keeps, not just onto it: moved by the overshoot alone, it would end up
+    flush against the edge.
     """
     if not slide_w or not slide_h:
         return []
+    margins = layout["margins"] or {}
     findings = []
     for shape in shapes:
         if not shape.get("visible", True):
@@ -377,21 +628,35 @@ def _off_slide(slide_index, shapes, slide_w, slide_h):
         if not past:
             continue
         parts = [f"{_pt(amount)} past the {edge} edge" for edge, amount in past.items()]
-        moves = []
-        if "left" in past:
-            moves.append(f"right by {_pt(past['left'])}")
-        if "right" in past:
-            moves.append(f"left by {_pt(past['right'])}")
-        if "top" in past:
-            moves.append(f"down by {_pt(past['top'])}")
-        if "bottom" in past:
-            moves.append(f"up by {_pt(past['bottom'])}")
         name = shape["name"]
+        moves, calls, kept, too_big = [], [], [], []
+        for low, high, field, keep, words, bigger in (
+            ("left", "right", "left", margins.get("horizontal"), ("right", "left"), "wider"),
+            ("top", "bottom", "top", margins.get("vertical"), ("down", "up"), "taller"),
+        ):
+            if low in past and high in past:
+                too_big.append(bigger)
+                continue
+            for edge, sign, word in ((low, 1, words[0]), (high, -1, words[1])):
+                if edge not in past:
+                    continue
+                amount = past[edge] + (keep or 0.0)
+                moves.append(f"{word} by {'' if keep else 'at least '}{_pt(amount)}")
+                calls.append(f"{field}={_num(shape[field] + sign * amount)}")
+                if keep:
+                    kept.append(_pt(keep))
+        if too_big:
+            fix = f"'{name}' is {' and '.join(too_big)} than the slide: make it smaller."
+        else:
+            keeping = (f", to keep the {' and '.join(kept)} margin"
+                       f"{'s' if len(kept) > 1 else ''} the rest of the slide keeps"
+                       if kept else "")
+            fix = (f"Move '{name}' {' and '.join(moves)}{keeping} "
+                   f"(ppt_update_shape {' '.join(calls)}), or make it smaller.")
         findings.append(_finding(
             slide_index, "off_slide", [name],
             f"'{name}' runs {' and '.join(parts)} of the slide.",
-            f"Move '{name}' {' and '.join(moves)}, or make it smaller.",
-            edges=past,
+            fix, edges=past,
         ))
     return findings
 
@@ -430,23 +695,27 @@ def _overflow(slide_index, shapes):
                 slide_index, "overflow", [name],
                 f"A line of text in '{name}' is {_pt(needed)} long and the "
                 f"box has {_pt(room)} for it, so it runs out of the side.",
-                f"Make '{name}' {_pt(needed - room)} wider, turn word wrap "
-                "on, or shorten the line.",
+                f"Make '{name}' {_pt(needed - room)} wider (ppt_update_shape "
+                f"width={_num(shape['width'] + needed - room)}), turn word "
+                "wrap on (ppt_set_textframe word_wrap=true), or shorten the line.",
                 needed_pt=needed, available_pt=room,
             ))
             continue
+        vertical = text.get("orientation") in ("vertical", "upward", "downward")
+        field = "width" if vertical else "height"
         findings.append(_finding(
             slide_index, "overflow", [name],
             f"The text in '{name}' needs {_pt(needed)} and the box has "
             f"{_pt(room)}, so it spills out of the box.",
-            f"Make '{name}' {_pt(needed - room)} taller, cut the text, or "
-            "make the font smaller.",
+            f"Make '{name}' {_pt(needed - room)} {'wider' if vertical else 'taller'} "
+            f"(ppt_update_shape {field}={_num(shape[field] + needed - room)}), "
+            "cut the text, or make the font smaller.",
             needed_pt=needed, available_pt=room,
         ))
     return findings
 
 
-def _overlap(slide_index, shapes):
+def _overlap(slide_index, shapes, layout):
     """Text that runs into another shape, or into other text.
 
     Only text is judged. Two filled shapes crossing may be a Venn diagram or a
@@ -474,11 +743,12 @@ def _overlap(slide_index, shapes):
             if pair in seen:
                 continue
             seen.add(pair)
-            findings.append(_overlap_finding(slide_index, a, a_text, b, b_ink, width, height))
+            findings.append(_overlap_finding(
+                slide_index, a, a_text, b, b_ink, width, height, layout))
     return findings
 
 
-def _overlap_finding(slide_index, a, a_text, b, b_ink, width, height):
+def _overlap_finding(slide_index, a, a_text, b, b_ink, width, height, layout):
     a_name, b_name = a["name"], b["name"]
     shared = {"width": round(width, 1), "height": round(height, 1)}
 
@@ -488,22 +758,32 @@ def _overlap_finding(slide_index, a, a_text, b, b_ink, width, height):
     area = _width(a_text) * _height(a_text)
     if (paints_box(b) and b.get("z", 0) < a.get("z", 0)
             and area and width * height >= 0.5 * area):
-        past = {
-            "left": b_ink[0] - a_text[0],
-            "top": b_ink[1] - a_text[1],
-            "right": a_text[2] - b_ink[2],
-            "bottom": a_text[3] - b_ink[3],
-        }
-        past = {edge: round(amount, 1) for edge, amount in past.items()
-                if amount > _EDGE_TOLERANCE}
+        room = _room(a_text, b_ink)
+        past = {edge: round(-amount, 1) for edge, amount in room.items()
+                if -amount > _EDGE_TOLERANCE}
         parts = " and ".join(f"{_pt(amount)} past its {edge} edge"
                              for edge, amount in past.items())
+        # Grown by the overshoot alone, the card would end exactly where the
+        # text does. It grows by as much again as the text has on the other
+        # side, so the text is padded evenly.
+        if b_name in layout["boxes"]:
+            grows = []
+            for edge, amount in past.items():
+                want = _wanted_room(room, edge)
+                grows.append(
+                    _grow(b, edge, amount + want, layout)
+                    + (f", which leaves the text {_pt(want)} {_WHERE[edge]}"
+                       f"{_padding(room, edge, want)}" if want else "")
+                )
+            fix = f"{'; '.join(grows)}. Or make the text of '{a_name}' shorter or smaller."
+            fix = fix[0].upper() + fix[1:]
+        else:
+            fix = (f"Make '{b_name}' larger by that much, or make the text of "
+                   f"'{a_name}' shorter or smaller.")
         return _finding(
             slide_index, "overlap", [a_name, b_name],
             f"The text of '{a_name}' sits on '{b_name}' and runs {parts}.",
-            f"Make '{b_name}' larger by that much, or make the text of "
-            f"'{a_name}' shorter or smaller.",
-            overlap_pt=shared, past_edges=past,
+            fix, overlap_pt=shared, past_edges=past,
         )
 
     # What b puts on the slide is its text when it does not paint its box.
@@ -512,19 +792,20 @@ def _overlap_finding(slide_index, a, a_text, b, b_ink, width, height):
     if height <= width:
         clear = height + 4.0
         if (b_ink[1] + b_ink[3]) >= (a_text[1] + a_text[3]):
-            fix = (f"Move '{b_name}' down by {_pt(clear)}, or move '{a_name}' "
-                   f"up or shorten its text by that much.")
+            fix = (f"Move '{b_name}' down by {_pt(clear)} (ppt_update_shape "
+                   f"dtop={_num(clear)}), or move '{a_name}' up or shorten "
+                   "its text by that much.")
         else:
-            fix = (f"Move '{b_name}' up by {_pt(clear)}, or move '{a_name}' "
-                   f"down by that much.")
+            fix = (f"Move '{b_name}' up by {_pt(clear)} (ppt_update_shape "
+                   f"dtop={_num(-clear)}), or move '{a_name}' down by that much.")
     else:
         clear = width + 4.0
         if (b_ink[0] + b_ink[2]) >= (a_text[0] + a_text[2]):
-            fix = (f"Move '{b_name}' right by {_pt(clear)}, or make "
-                   f"'{a_name}' narrower by that much.")
+            fix = (f"Move '{b_name}' right by {_pt(clear)} (ppt_update_shape "
+                   f"dleft={_num(clear)}), or make '{a_name}' narrower by that much.")
         else:
-            fix = (f"Move '{b_name}' left by {_pt(clear)}, or move "
-                   f"'{a_name}' right by that much.")
+            fix = (f"Move '{b_name}' left by {_pt(clear)} (ppt_update_shape "
+                   f"dleft={_num(-clear)}), or move '{a_name}' right by that much.")
     return _finding(
         slide_index, "overlap", [a_name, b_name],
         f"The text of '{a_name}' runs into {target}: they share an area "
@@ -595,18 +876,39 @@ def _low_contrast(slide_index, shapes, background_hex):
             continue
         ratio, needed, colour = worst
         name = shape["name"]
-        dark, light = _contrast_ratio("#000000", backdrop), _contrast_ratio("#FFFFFF", backdrop)
-        suggestion = "#000000" if dark >= light else "#FFFFFF"
+        # The colour the slide's other text already uses keeps it looking like
+        # one slide; black or white is the answer when none of them is enough.
+        ours = [c for c in _text_colours(shapes, shape)
+                if _contrast_ratio(c, backdrop) >= needed]
+        if ours:
+            suggestion, source = ours[0], ", the colour of the other text on the slide"
+        else:
+            dark, light = _contrast_ratio("#000000", backdrop), _contrast_ratio("#FFFFFF", backdrop)
+            suggestion, source = ("#000000" if dark >= light else "#FFFFFF"), ""
         findings.append(_finding(
             slide_index, "low_contrast", [name],
             f"Text in '{name}' is {colour} on {backdrop}, a contrast of "
             f"{ratio:.1f}:1 where {needed:g}:1 is the minimum for its size.",
-            f"Make the text {suggestion} (contrast "
-            f"{max(dark, light):.1f}:1), or change what is behind it.",
+            f"Make the text {suggestion}{source} (contrast "
+            f"{_contrast_ratio(suggestion, backdrop):.1f}:1): ppt_format_text "
+            f"color='{suggestion}'. Or change what is behind it.",
             text_color=colour, backdrop_color=backdrop,
             contrast=round(ratio, 2), minimum=needed,
         ))
     return findings
+
+
+def _text_colours(shapes, exclude):
+    """The colours the slide's other text is set in, the most used first."""
+    counts = {}
+    for shape in shapes:
+        if shape is exclude or not shape.get("visible", True):
+            continue
+        for run in (shape.get("text") or {}).get("runs") or []:
+            colour = (run.get("color_hex") or "").upper()
+            if colour:
+                counts[colour] = counts.get(colour, 0) + 1
+    return sorted(counts, key=lambda c: -counts[c])
 
 
 # Edge names per axis, in the order they are preferred when two tie.
@@ -616,8 +918,8 @@ _Y_EDGES = ("top", "middle", "bottom")
 
 def _edges(box, axis):
     if axis == "x":
-        return dict(zip(_X_EDGES, (box[0], (box[0] + box[2]) / 2, box[2])))
-    return dict(zip(_Y_EDGES, (box[1], (box[1] + box[3]) / 2, box[3])))
+        return dict(zip(_X_EDGES, (box[0], (box[0] + box[2]) / 2, box[2]), strict=True))
+    return dict(zip(_Y_EDGES, (box[1], (box[1] + box[3]) / 2, box[3]), strict=True))
 
 
 def _related(a_box, b_box, axis) -> bool:
@@ -630,7 +932,7 @@ def _related(a_box, b_box, axis) -> bool:
     return shared >= _SHARED_SPAN * min(_height(a_box), _height(b_box))
 
 
-def _misaligned(slide_index, shapes, slide_w, slide_h, only=None):
+def _misaligned(slide_index, layout, only=None):
     """Edges a few points apart that were meant to be one edge.
 
     Each pair of shapes in a row is compared top, middle and bottom, and each
@@ -639,17 +941,22 @@ def _misaligned(slide_index, shapes, slide_w, slide_h, only=None):
     ``_NEAR_MISS`` apart, but not together, is the slip this reports.
 
     Of the two, the one to move is the one lined up with fewer other shapes,
-    and between equals the one added later. One finding names it with every
-    shape it nearly lines up with.
+    and between equals the one added later. One finding names it with the
+    shapes on the line it nearly meets.
+
+    Only shapes on the same level are compared: cards with cards, and the text
+    on one card with the text on the next. Text is placed on its card, inset
+    from its edges, rather than lined up with it or with the cards beside it.
     """
-    arranged = _arranged(shapes, slide_w, slide_h)
-    boxes = {s["name"]: shape_box(s) for s in arranged}
+    arranged, boxes, depth = layout["arranged"], layout["boxes"], layout["depth"]
     findings = []
     for axis in ("x", "y"):
         aligned = {s["name"]: 0 for s in arranged}
         near = []
         for i, a in enumerate(arranged):
             for b in arranged[i + 1:]:
+                if depth[a["name"]] != depth[b["name"]]:
+                    continue
                 a_box, b_box = boxes[a["name"]], boxes[b["name"]]
                 if not _related(a_box, b_box, axis):
                     continue
@@ -673,13 +980,11 @@ def _misaligned(slide_index, shapes, slide_w, slide_h, only=None):
                 anchor, mover = b, a
             grouped.setdefault((mover["name"], edge), (mover, edge, []))[2].append(anchor)
 
-        for (name, edge), (mover, edge, anchors) in grouped.items():
-            if only is not None and name not in only and not any(
-                anchor["name"] in only for anchor in anchors
-            ):
+        for mover, edge, anchors in grouped.values():
+            finding = _misaligned_finding(slide_index, axis, mover, edge, anchors, boxes)
+            if only is not None and not set(finding["shapes"]) & set(only):
                 continue
-            findings.append(_misaligned_finding(
-                slide_index, axis, mover, edge, anchors, boxes))
+            findings.append(finding)
     return findings
 
 
@@ -692,6 +997,9 @@ def _misaligned_finding(slide_index, axis, mover, edge, anchors, boxes):
         {round(v, 2) for v in values},
         key=lambda v: (sum(1 for x in values if abs(x - v) <= _ALIGNED), -abs(v - mine)),
     )
+    # Only the shapes on that line are named. One that is off it as well is
+    # off against them too, and has its own finding.
+    anchors = [a for a, v in zip(anchors, values, strict=True) if abs(v - target) <= _ALIGNED]
     delta = mine - target
     # Moving the whole shape by the difference puts that edge on the target,
     # whichever edge it is.
@@ -733,76 +1041,192 @@ def _connected(members, joined):
     return list(groups.values())
 
 
-def _uneven_spacing(slide_index, shapes, slide_w, slide_h):
+def _uneven_spacing(slide_index, layout, slide_w):
     """Rows and columns of like shapes whose gaps differ.
 
     Three or more shapes of about the same size, side by side in a row or
     stacked in a column, are one group: cards, steps, columns of icons. Their
     gaps are meant to be equal. Shapes sitting inside another shape belong to
     it, so the text on three cards is not a fourth row to space.
+
+    A row that reaches across the slide is spread between the side margins
+    rather than between its own two ends. When an end card is the one out of
+    place, evening out the gaps around it leaves the row off centre.
     """
-    arranged = _arranged(shapes, slide_w, slide_h)
-    boxes = {s["name"]: shape_box(s) for s in arranged}
-
-    def area(box):
-        return _width(box) * _height(box)
-
-    def belongs_to(s, other):
-        # Mostly inside, rather than wholly: the text on a card still belongs
-        # to the card when it runs past its edge, which is its own finding,
-        # and it is not a fourth card in the row. A text box set to grow with
-        # its text can end up with a larger frame than the card it is on, so
-        # a frame that only holds text belongs to a shape that paints, at any
-        # size.
-        mine, theirs = boxes[s["name"]], boxes[other["name"]]
-        width, height = _shared(mine, theirs)
-        if width * height < 0.5 * area(mine):
-            return False
-        if paints_box(s) != paints_box(other):
-            # Never the other way round: a card is not inside a text frame.
-            return paints_box(other)
-        return area(theirs) > area(mine)
-
-    outer = [
-        s for s in arranged
-        if not any(other is not s and belongs_to(s, other) for other in arranged)
-    ]
-
-    def similar(a, b):
-        aw, ah = _width(boxes[a["name"]]), _height(boxes[a["name"]])
-        bw, bh = _width(boxes[b["name"]]), _height(boxes[b["name"]])
-        return (abs(aw - bw) <= _SIMILAR_SIZE * max(aw, bw)
-                and abs(ah - bh) <= _SIMILAR_SIZE * max(ah, bh))
-
+    boxes = layout["boxes"]
+    margin = (layout["margins"] or {}).get("horizontal")
     findings = []
-    # A row shares its height and is spaced along x; a column the other way.
-    for axis, direction, start in (("y", "horizontal", 0), ("x", "vertical", 1)):
-        def joined(a, b, axis=axis):
-            return similar(a, b) and _related(boxes[a["name"]], boxes[b["name"]], axis)
-
-        for members in _connected(outer, joined):
-            if len(members) < 3:
-                continue
-            members.sort(key=lambda s: boxes[s["name"]][start])
-            gaps = [
-                boxes[b["name"]][start] - boxes[a["name"]][start + 2]
-                for a, b in zip(members, members[1:])
-            ]
-            if min(gaps) <= 0 or max(gaps) - min(gaps) <= _GAP_TOLERANCE:
-                continue
-            names = [s["name"] for s in members]
+    for direction, members in layout["groups"]:
+        if len(members) < 3:
+            continue
+        # A row is spaced along x, a column along y.
+        start = 0 if direction == "horizontal" else 1
+        gaps = [
+            boxes[b["name"]][start] - boxes[a["name"]][start + 2]
+            for a, b in zip(members, members[1:], strict=False)
+        ]
+        if min(gaps) <= 0 or max(gaps) - min(gaps) <= _GAP_TOLERANCE:
+            continue
+        names = [s["name"] for s in members]
+        fix = None
+        if direction == "horizontal" and margin is not None and _spans(members, boxes, slide_w):
+            fix = _row_fix(members, boxes, slide_w, margin)
+        if fix is None:
             even = sum(gaps) / len(gaps)
-            listed = ", ".join(f"'{n}'" for n in names)
+            fix = (f"ppt_distribute_shapes with these shape names and "
+                   f"direction='{direction}', or make every gap {_pt(even)}.")
+        listed = ", ".join(f"'{n}'" for n in names)
+        findings.append(_finding(
+            slide_index, "uneven_spacing", names,
+            f"The gaps between {listed} are "
+            f"{', '.join(_pt(g) for g in gaps)}; a "
+            f"{'row' if direction == 'horizontal' else 'column'} of like "
+            "shapes reads as one group when they are equal.",
+            fix, severity="warning", gaps_pt=[round(g, 1) for g in gaps],
+        ))
+    return findings
+
+
+def _uneven_sizes(slide_index, layout):
+    """Like shapes side by side that are not quite one size.
+
+    Cards in a row are meant to be one height, and in a column one width.
+    Shapes far enough apart in size are different kinds of thing and are not
+    grouped at all, so what this finds is a card grown to hold its text while
+    the rest of its row was left as it was. Only shapes that paint are
+    judged, since a text box's frame cannot be seen.
+    """
+    boxes = layout["boxes"]
+    findings, seen = [], set()
+    for groups, measure, field, word, kind in (
+        (layout["rows"], _height, "height", "tall", "row"),
+        (layout["columns"], _width, "width", "wide", "column"),
+    ):
+        for names in groups.values():
+            if tuple(names) in seen:
+                continue
+            seen.add(tuple(names))
+            sizes = {name: measure(boxes[name]) for name in names}
+            biggest = max(sizes.values())
+            if biggest - min(sizes.values()) <= _SIZE_TOLERANCE:
+                continue
+            clusters = sorted(
+                _clusters(list(sizes.items()), _SIZE_TOLERANCE),
+                key=lambda g: -max(v for _, v in g),
+            )
+            described = "; ".join(
+                f"{_pt(max(v for _, v in g))} for "
+                f"{', '.join(repr(n) for n in names if n in dict(g))}"
+                for g in clusters
+            )
             findings.append(_finding(
-                slide_index, "uneven_spacing", names,
-                f"The gaps between {listed} are "
-                f"{', '.join(_pt(g) for g in gaps)}; a "
-                f"{'row' if direction == 'horizontal' else 'column'} of like "
-                "shapes reads as one group when they are equal.",
-                f"ppt_distribute_shapes with these shape names and "
-                f"direction='{direction}', or make every gap {_pt(even)}.",
-                severity="warning", gaps_pt=[round(g, 1) for g in gaps],
+                slide_index, "uneven_sizes", names,
+                f"A {kind} of like shapes is not one {field}: {described}.",
+                f"Make them all {_pt(biggest)} {word}, unless one is meant to "
+                f"stand out: ppt_update_shape shape_names={names} "
+                f"{field}={_num(biggest)}.",
+                severity="warning",
+                sizes_pt={name: round(size, 1) for name, size in sizes.items()},
             ))
+    return findings
+
+
+def _cramped_text(slide_index, layout):
+    """Text pressed against an edge of the card it sits on.
+
+    The text does not cross the edge, so nothing overlaps, but it has next to
+    no room on one side and plenty on the other, and reads as cut off. A card
+    grown by exactly as much as its text overflowed leaves it just like this.
+    """
+    boxes = layout["boxes"]
+    findings = []
+    for shape in layout["arranged"]:
+        if paints_box(shape):
+            # Text in a shape's own frame is inset by the frame's margins, and
+            # whether it fits there is the overflow check's question.
+            continue
+        words = text_box(shape)
+        card = _card_of(shape, layout) if words else None
+        if card is None:
+            continue
+        room = _room(words, boxes[card["name"]])
+        if min(room.values()) < -_EDGE_TOLERANCE:
+            continue  # It runs past the edge, which overlap reports.
+        for side in ("bottom", "top", "right", "left"):
+            want = _wanted_room(room, side)
+            have = max(room[side], 0.0)
+            if have >= _MIN_ROOM or have >= 0.5 * want:
+                continue
+            name, card_name, short = shape["name"], card["name"], want - have
+            if side == "bottom":
+                fix = _grow(card, "bottom", short, layout)
+            elif side == "top":
+                fix = f"move '{name}' down by {_pt(short)} (ppt_update_shape dtop={_num(short)})"
+                if room["bottom"] - short < want:
+                    fix += f", and {_grow(card, 'bottom', want - room['bottom'] + short, layout)}"
+            elif side == "left":
+                fix = f"move '{name}' right by {_pt(short)} (ppt_update_shape dleft={_num(short)})"
+            else:
+                fix = (f"make '{name}' {_pt(short)} narrower so its lines wrap "
+                       f"sooner (ppt_update_shape dwidth={_num(-short)}), or "
+                       f"{_grow(card, 'right', short, layout)}")
+            opposite = _OPPOSITE[side]
+            findings.append(_finding(
+                slide_index, "cramped_text", [name, card_name],
+                f"The text of '{name}' is {_pt(have)} from the {side} edge of "
+                f"'{card_name}', with {_pt(room[opposite])} {_WHERE[opposite]}, "
+                "so it looks pressed against the edge.",
+                f"{fix[0].upper()}{fix[1:]}, which leaves it {_pt(want)} "
+                f"{_WHERE[side]}{_padding(room, side, want)}.",
+                severity="warning", room_pt={k: round(v, 1) for k, v in room.items()},
+            ))
+            break
+    return findings
+
+
+def _narrow_margins(slide_index, layout, slide_w):
+    """Shapes closer to the side of the slide than the rest of it keeps.
+
+    A shape touching the edge bleeds off it on purpose and is left alone, and
+    one past it is off the slide, which is its own finding. What is left is a
+    shape that stops short of the edge but inside the margin the other shapes
+    keep: a row one card too far to the right, or a box pushed back onto the
+    slide only just far enough.
+    """
+    margins = layout["margins"]
+    if not margins:
+        return []
+    side = margins["horizontal"]
+    boxes = layout["boxes"]
+    rows = {s["name"]: members for direction, members in layout["groups"]
+            if direction == "horizontal" for s in members}
+    findings = []
+    for shape in layout["arranged"]:
+        ink = ink_box(shape) if not layout["depth"][shape["name"]] else None
+        if ink is None:
+            continue
+        for edge, distance in (("left", ink[0]), ("right", slide_w - ink[2])):
+            if distance <= _EDGE_TOLERANCE or distance >= side - _MARGIN_TOLERANCE:
+                continue
+            name, box = shape["name"], boxes[shape["name"]]
+            row = rows.get(name)
+            fix = _row_fix(row, boxes, slide_w, side) if row and _spans(row, boxes, slide_w) else None
+            if fix is None and _width(box) > slide_w - 2 * side:
+                fix = (f"Make '{name}' {_pt(_width(box) - slide_w + 2 * side)} "
+                       f"narrower and move it to the margin (ppt_update_shape "
+                       f"left={_num(side)} width={_num(slide_w - 2 * side)}).")
+            elif fix is None:
+                left = min(max(box[0], side), slide_w - side - _width(box))
+                fix = (f"Move '{name}' {'right' if left > box[0] else 'left'} by "
+                       f"{_pt(abs(left - box[0]))} (ppt_update_shape left={_num(left)}).")
+            findings.append(_finding(
+                slide_index, "narrow_margin", [name],
+                f"'{name}' comes within {_pt(distance)} of the {edge} edge of "
+                f"the slide, where the rest of the slide keeps {_pt(side)}.",
+                fix, severity="warning", edge=edge,
+                distance_pt=round(distance, 1), margin_pt=side,
+            ))
+            break
     return findings
 
 
@@ -834,22 +1258,29 @@ def slide_findings(slide, slide_w, slide_h, only=None):
     """
     index = slide["slide_index"]
     shapes = slide["shapes"]
+    layout = _layout(shapes, slide_w, slide_h)
     findings = (
-        _off_slide(index, shapes, slide_w, slide_h)
+        _off_slide(index, shapes, slide_w, slide_h, layout)
         + _overflow(index, shapes)
-        + _overlap(index, shapes)
+        + _overlap(index, shapes, layout)
         + _low_contrast(index, shapes, slide.get("background_hex"))
-        + _misaligned(index, shapes, slide_w, slide_h, only=only)
+        + _cramped_text(index, layout)
+        + _narrow_margins(index, layout, slide_w)
+        + _misaligned(index, layout, only=only)
+        + _uneven_sizes(index, layout)
     )
     if only is not None:
-        return [
+        return _sorted([
             f for f in findings
             if f["type"] in SHAPE_FINDINGS and any(name in only for name in f["shapes"])
-        ]
-    findings += (
-        _uneven_spacing(index, shapes, slide_w, slide_h)
-        + _empty_placeholders(index, shapes)
-    )
+        ])
+    spacing = _uneven_spacing(index, layout, slide_w)
+    # A row whose gaps are reported is put back between the margins by that
+    # finding's fix, so its cards are not told about the margin as well.
+    spaced = {name for f in spacing for name in f["shapes"]}
+    findings = [f for f in findings
+                if not (f["type"] == "narrow_margin" and f["shapes"][0] in spaced)]
+    findings += spacing + _empty_placeholders(index, shapes)
     return _sorted(findings)
 
 
@@ -954,10 +1385,12 @@ def deck_findings(slides, slide_h):
             names = [shape["name"] for index, shape in titled if index in odd]
             if field is None:
                 fix = (f"Set the titles on {_slides(odd)} to "
-                       f"{round(usual_value, 1):g} pt.")
+                       f"{round(usual_value, 1):g} pt (ppt_format_text "
+                       f"font_size={round(usual_value, 1):g}).")
             else:
                 fix = (f"Set {field} of the titles on {_slides(odd)} to "
-                       f"{round(usual_value, 1):g} pt.")
+                       f"{round(usual_value, 1):g} pt (ppt_update_shape "
+                       f"{field}={round(usual_value, 2):g}).")
             findings.append(_finding(
                 None, "inconsistent_titles", names,
                 f"Slide titles{f' on the {layout} layout' if layout else ''} "
@@ -979,15 +1412,22 @@ def within_reach(shape, touched) -> bool:
     rest are left unread, which on macOS is most of the cost of a check.
 
     Placeholders are always read, since whether one is empty decides whether it
-    is lined up against anything. Text overflowing its own frame far enough to
-    reach a touched shape is the one meeting this misses, and that shape's own
-    write already reported the overflow.
+    is lined up against anything. So are like shapes in a touched shape's row
+    or column, since whether they paint decides whether the row has to be one
+    size. Text overflowing its own frame far enough to reach a touched shape is
+    the one meeting this misses, and that shape's own write already reported
+    the overflow.
     """
     if shape.get("placeholder_type") is not None:
         return True
     box = shape_box(shape)
     for other in touched:
-        for reach in (shape_box(other), text_box(other)):
+        other_box = shape_box(other)
+        if _similar(box, other_box) and (
+            _related(box, other_box, "x") or _related(box, other_box, "y")
+        ):
+            return True
+        for reach in (other_box, text_box(other)):
             if reach is None:
                 continue
             width, height = _shared(box, reach)
@@ -1183,14 +1623,14 @@ def read_shapes(refs, geometry, appearance, detail):
     """
     shapes = [geometry(ref, z) for z, ref in enumerate(refs, start=1)]
     if detail is None:
-        for facts, ref in zip(shapes, refs):
+        for facts, ref in zip(shapes, refs, strict=True):
             appearance(facts, ref, True)
         return shapes
     touched = []
-    for facts, ref in zip(shapes, refs):
+    for facts, ref in zip(shapes, refs, strict=True):
         if facts["name"] in detail:
             touched.append(appearance(facts, ref, True))
-    for facts, ref in zip(shapes, refs):
+    for facts, ref in zip(shapes, refs, strict=True):
         if facts["name"] not in detail and within_reach(facts, touched):
             appearance(facts, ref, False)
     return shapes
@@ -1354,8 +1794,13 @@ def register_tools(mcp):
         - overlap: text runs into another shape or other text
         - low_contrast: text colour against what is behind it is below the
           WCAG minimum for its size
+        - cramped_text: text on a card pressed against one of its edges
+        - narrow_margin: a shape closer to the side of the slide than the
+          margin the rest of the slide keeps
         - misaligned: edges a few points apart that were meant to line up
         - uneven_spacing: a row or column of like shapes with unequal gaps
+        - uneven_sizes: like shapes in a row (or column) that are not one
+          height (or width)
         - empty_placeholder: a placeholder left without text
         - inconsistent_titles (whole deck only): titles that differ in size or
           position between slides with the same layout

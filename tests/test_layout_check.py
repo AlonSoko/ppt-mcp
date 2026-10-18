@@ -86,6 +86,21 @@ def check(*shapes, **kwargs):
     return slide_findings(slide(*shapes, **kwargs), W, H)
 
 
+def titled_row(lefts=(40, 340, 640), heights=(180, 180, 180)):
+    """A title across the slide and a row of three cards under it, 40 pt in
+    from both sides, as the live test slide was built."""
+    title = textbox("title", 40, 30, 880, 55.74, z=1, text_width=300, text_height=48)
+    return [title] + [card(f"card{i}", left, 140, 280, height, z=2 + i)
+                      for i, (left, height) in enumerate(zip(lefts, heights, strict=True))]
+
+
+def spill():
+    """The paragraph on the first card, where PowerPoint for Mac drew it:
+    its text from 153.6 to 345.6 pt, 25.6 pt past a 180 pt card."""
+    return textbox("words", 52, 150, 256, 201.15, z=9,
+                   text_width=245.07, text_height=192)
+
+
 # ---------------------------------------------------------------------------
 # What a shape puts on the slide
 # ---------------------------------------------------------------------------
@@ -155,7 +170,16 @@ class TestOffSlide:
         [finding] = check(card("c", 900, 100, 100, 50))
         assert finding["type"] == "off_slide"
         assert finding["edges"] == {"right": 40.0}
-        assert "left by 40 pt" in finding["fix"]
+        # With nothing else on the slide there is no margin to keep.
+        assert "left by at least 40 pt (ppt_update_shape left=860)" in finding["fix"]
+
+    def test_it_comes_back_inside_the_margin_not_onto_the_edge(self):
+        # Live: moved by the overshoot alone, the box ended flush against the
+        # slide's right edge.
+        [finding] = check(*titled_row(), card("box", 900, 470, 120, 50, z=9))
+        assert finding["edges"] == {"right": 60.0}
+        assert "left by 100 pt, to keep the 40 pt margin" in finding["fix"]
+        assert "ppt_update_shape left=800" in finding["fix"]
 
     def test_a_frame_hanging_over_the_edge_with_its_text_inside_is_fine(self):
         assert check(textbox("t", 800, 100, 300, 50, text_width=100)) == []
@@ -228,6 +252,15 @@ class TestOverlap:
         [finding] = [f for f in found if f["type"] == "overlap"]
         assert "runs into 'icon'" in finding["message"]
 
+    def test_the_card_grows_with_padding_and_its_row_with_it(self):
+        # Live: "larger by that much" left the last line on the card's edge
+        # and the card taller than the other two.
+        [finding] = [f for f in check(*titled_row(), spill()) if f["type"] == "overlap"]
+        assert finding["past_edges"] == {"bottom": 25.6}
+        assert "make 'card0' 39.2 pt taller" in finding["fix"].lower()
+        assert "shape_names=['card0', 'card1', 'card2'] height=219.2" in finding["fix"]
+        assert "13.6 pt below, as it has above" in finding["fix"]
+
     def test_two_filled_shapes_crossing_are_left_alone(self):
         # A Venn diagram looks exactly like this.
         assert check(card("a", 100, 100, 200, 200, z=1),
@@ -271,6 +304,17 @@ class TestContrast:
         found = check(glass, textbox("t", 100, 100, 300, 50, z=2, runs=WHITE_TEXT))
         assert "low_contrast" not in kinds(found)
 
+    def test_the_fix_names_the_call(self):
+        [finding] = check(textbox("t", 100, 100, 300, 50, runs=WHITE_TEXT))
+        assert "ppt_format_text color='#000000'" in finding["fix"]
+
+    def test_the_fix_prefers_the_colour_the_other_text_uses(self):
+        found = check(textbox("title", 40, 30, 880, 60, z=1),
+                      textbox("note", 40, 440, 400, 40, z=2, runs=WHITE_TEXT))
+        [finding] = found
+        assert "#222222, the colour of the other text on the slide" in finding["fix"]
+        assert "ppt_format_text color='#222222'" in finding["fix"]
+
     def test_large_text_is_held_to_the_lower_minimum(self):
         grey = [{"color_hex": "#949494", "size": 24.0, "bold": False}]
         assert check(textbox("t", 100, 100, 300, 50, runs=grey)) == []
@@ -313,6 +357,38 @@ class TestMisaligned:
         [finding] = [f for f in found if f["type"] == "misaligned"]
         assert finding["shapes"] == ["body", "title"]
         assert "left=40" in finding["fix"]
+
+    def test_text_on_a_card_is_not_lined_up_with_the_row(self):
+        # Live on PowerPoint for Mac, once the cards had grown to hold this
+        # text: the middle of its frame was 0.6 pt off the middle of the
+        # cards, and the text was reported as out of line with them.
+        found = check(card("one", 40, 140, 280, 220, z=1),
+                      card("two", 340, 140, 280, 220, z=2),
+                      card("three", 650, 140, 280, 220, z=3),
+                      textbox("words", 52, 150, 256, 201.15, z=4,
+                              text_width=245.07, text_height=192))
+        assert "misaligned" not in kinds(found)
+
+    def test_the_text_on_one_card_is_lined_up_with_the_next(self):
+        lefts = (40, 340, 640)
+        cards = [card(f"card{i}", left, 140, 280, 220, z=i + 1)
+                 for i, left in enumerate(lefts)]
+        heads = [textbox(f"head{i}", left + 20, 163 if i == 1 else 160, 240, 40,
+                         z=4 + i, text_width=100)
+                 for i, left in enumerate(lefts)]
+        [finding] = [f for f in check(*cards, *heads) if f["type"] == "misaligned"]
+        assert finding["shapes"][0] == "head1"
+        assert set(finding["shapes"][1:]) == {"head0", "head2"}
+
+    def test_only_the_shapes_on_the_line_are_named(self):
+        found = check(card("one", 100, 200, 100, 100, z=1),
+                      card("two", 230, 203, 100, 100, z=2),
+                      card("three", 360, 200, 100, 100, z=3),
+                      card("four", 490, 201.5, 100, 100, z=4))
+        by_mover = {f["shapes"][0]: f for f in found if f["type"] == "misaligned"}
+        assert set(by_mover) == {"two", "four"}
+        assert set(by_mover["four"]["shapes"][1:]) == {"one", "three"}
+        assert "'two'" not in by_mover["four"]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +434,104 @@ class TestUnevenSpacing:
                       card("two", 224, 200, 300, 100, z=2),
                       card("three", 555, 200, 50, 100, z=3))
         assert "uneven_spacing" not in kinds(found)
+
+    def test_a_row_across_the_slide_is_spread_between_the_margins(self):
+        # Live: the end card was the one 10 pt out, and distributing kept it
+        # there, with the gaps even and the row off centre.
+        found = check(*titled_row(lefts=(40, 340, 650)))
+        [finding] = [f for f in found if f["type"] == "uneven_spacing"]
+        assert finding["gaps_pt"] == [20.0, 30.0]
+        assert "Set left of 'card2' to 640 pt" in finding["fix"]
+        assert "Every gap is then 20 pt" in finding["fix"]
+        # The same card is not reported a second time for the margin.
+        assert "narrow_margin" not in kinds(found)
+
+
+# ---------------------------------------------------------------------------
+# Sizes, room on a card, margins
+# ---------------------------------------------------------------------------
+class TestUnevenSizes:
+    def test_one_card_taller_than_its_row_is_reported(self):
+        found = check(*titled_row(heights=(205.6, 180, 180)))
+        [finding] = [f for f in found if f["type"] == "uneven_sizes"]
+        assert finding["sizes_pt"] == {"card0": 205.6, "card1": 180.0, "card2": 180.0}
+        assert "205.6 pt for 'card0'; 180 pt for 'card1', 'card2'" in finding["message"]
+        assert "shape_names=['card0', 'card1', 'card2'] height=205.6" in finding["fix"]
+
+    def test_a_point_or_two_is_the_same_size(self):
+        assert "uneven_sizes" not in kinds(check(*titled_row(heights=(181.5, 180, 180))))
+
+    def test_text_boxes_of_different_heights_are_not_judged(self):
+        # Their frames cannot be seen, and text runs as long as it runs.
+        found = check(textbox("a", 40, 140, 280, 100, z=1, text_height=90),
+                      textbox("b", 340, 140, 280, 90, z=2, text_height=80),
+                      textbox("c", 640, 140, 280, 110, z=3, text_height=100))
+        assert "uneven_sizes" not in kinds(found)
+
+    def test_a_write_to_one_card_hears_about_the_row(self):
+        facts = slide(*titled_row(heights=(205.6, 180, 180)))
+        found = slide_findings(facts, W, H, only={"card0"})
+        assert kinds(found) == ["uneven_sizes"]
+
+
+class TestCrampedText:
+    def test_text_on_the_edge_of_its_card_is_reported(self):
+        # Live, after the card grew by the overshoot alone.
+        found = check(*titled_row(heights=(205.6, 205.6, 205.6)), spill())
+        [finding] = [f for f in found if f["type"] == "cramped_text"]
+        assert finding["shapes"] == ["words", "card0"]
+        assert "0 pt from the bottom edge of 'card0', with 13.6 pt above" in finding["message"]
+        assert "shape_names=['card0', 'card1', 'card2'] height=219.2" in finding["fix"]
+        assert "overlap" not in kinds(found)
+
+    def test_evenly_padded_text_is_fine(self):
+        assert check(*titled_row(heights=(220, 220, 220)), spill()) == []
+
+    def test_text_at_the_top_edge_moves_down_by_the_side_padding(self):
+        found = check(card("card", 100, 100, 300, 200, z=1),
+                      textbox("words", 112.8, 97.4, 280, 40, z=2,
+                              text_width=200, text_height=40))
+        [finding] = [f for f in found if f["type"] == "cramped_text"]
+        assert "Move 'words' down by 19 pt (ppt_update_shape dtop=19)" in finding["fix"]
+
+    def test_little_room_all_round_is_a_badge(self):
+        found = check(card("pill", 100, 100, 80, 24, z=1),
+                      textbox("label", 95.8, 99.4, 88.4, 25.2, z=2,
+                              text_width=74, text_height=18))
+        assert "cramped_text" not in kinds(found)
+
+
+class TestNarrowMargins:
+    def test_a_card_inside_the_margin_moves_the_row(self):
+        # Live, after ppt_distribute_shapes: gaps of 25 pt, the row from 40
+        # to 930 pt, so 10 pt short of the margin on the right.
+        found = check(*titled_row(lefts=(40, 345, 650)))
+        [finding] = found
+        assert finding["type"] == "narrow_margin"
+        assert finding["shapes"] == ["card2"]
+        assert (finding["edge"], finding["distance_pt"], finding["margin_pt"]) == ("right", 30.0, 40.0)
+        assert "Set left of 'card1' to 340 pt and of 'card2' to 640 pt" in finding["fix"]
+
+    def test_a_shape_on_its_own_moves_in(self):
+        found = check(*titled_row(), card("box", 820, 470, 120, 50, z=9))
+        [finding] = found
+        assert "Move 'box' left by 20 pt (ppt_update_shape left=800)" in finding["fix"]
+
+    def test_a_shape_bleeding_off_the_edge_is_meant(self):
+        photo = shape("photo", 760, 0, 200, 540, z=9, type=msoPicture)
+        found = check(textbox("title", 40, 30, 680, 60, z=1),
+                      card("card", 40, 140, 280, 180, z=2), photo)
+        assert "narrow_margin" not in kinds(found)
+
+    def test_one_shape_is_not_a_margin(self):
+        assert check(card("card", 10, 100, 300, 100)) == []
+
+    def test_between_two_margins_the_narrower_is_kept(self):
+        # Two edges keep 40 pt and two keep 30: nothing says which is meant.
+        a, b = card("a", 40, 100, 880, 100, z=1), card("b", 30, 300, 900, 100, z=2)
+        layout = layout_check._layout([a, b], W, H)
+        assert layout["margins"]["horizontal"] == 30.0
+        assert "narrow_margin" not in kinds(check(a, b))
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +748,11 @@ class TestWhatAWriteReads:
         spilling = textbox("words", 100, 100, 200, 40, text_height=200)
         below = card("below", 100, 250, 200, 50)
         assert layout_check.within_reach(below, [spilling])
+
+    def test_a_like_shape_in_its_row_is_read(self):
+        touched = card("moved", 40, 140, 280, 180)
+        assert layout_check.within_reach(card("third", 640, 140, 280, 180), [touched])
+        assert not layout_check.within_reach(card("below", 640, 400, 280, 100), [touched])
 
     def test_a_placeholder_is_always_read(self):
         far = shape("Body", 600, 300, 100, 100, type=msoPlaceholder, placeholder_type=2)

@@ -141,7 +141,7 @@ def _run_styles(text_range) -> list:
             for column in columns
         ):
             raise ValueError("not one value per character")
-        rows = zip(texts, *columns)
+        rows = zip(texts, *columns, strict=True)
     except Exception:
         logger.debug("Bulk character read refused", exc_info=True)
         return []

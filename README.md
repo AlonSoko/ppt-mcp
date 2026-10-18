@@ -293,11 +293,14 @@ Auto-fix strategies include widening text boxes and inserting soft returns.
 - **Overflow** — text that needs more room than its box gives it
 - **Overlap** — text running into another shape or into other text
 - **Low contrast** — text against what is behind it, below the WCAG minimum for its size
+- **Cramped text** — text on a card pressed against one of its edges
+- **Narrow margin** — a shape closer to the side of the slide than the margin the rest of the slide keeps
 - **Misaligned** — edges a few points apart that were meant to line up
 - **Uneven spacing** — a row or column of like shapes with unequal gaps
+- **Uneven sizes** — like shapes in a row that are not one height, or in a column not one width
 - **Empty placeholders**, and, for the whole deck, **titles** that change size or position between slides with the same layout
 
-Each issue names the shapes and says how to fix it. The tools that add, move, resize or retext a shape also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it.
+Each issue names the shapes and says how to fix it, with the tool call and its values. A fix keeps the slide together rather than only clearing the issue: a card grows with its padding and the rest of its row, and a shape brought back onto the slide keeps the slide's margin. The tools that add, move, resize, align, distribute or retext a shape also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it.
 
 ## ⚙️ Advanced Configuration
 
