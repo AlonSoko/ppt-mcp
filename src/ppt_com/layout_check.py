@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import re
+from itertools import pairwise
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1892,7 +1893,7 @@ def _colour_at(stops, t, blend):
     """The colour of a gradient at position ``t``, its stops blended by ``blend``."""
     if t <= stops[0][0]:
         return stops[0][1]
-    for (p0, c0, _), (p1, c1, _) in zip(stops, stops[1:]):
+    for (p0, c0, _), (p1, c1, _) in pairwise(stops):
         if t <= p1:
             return c0 if p1 - p0 < 1e-9 else blend(c0, c1, (t - p0) / (p1 - p0))
     return stops[-1][1]
@@ -3712,7 +3713,8 @@ def register_tools(mcp):
           table's cells or is hidden under a card, or something the slide
           added runs into the template's own logo, band or footer
         - low_contrast: text colour against what is behind it is below the
-          WCAG minimum for its size
+          WCAG minimum for its size; on a gradient, against the part of it
+          the text is on
         - cramped_text: text on a card pressed against one of its edges
         - narrow_margin: a shape closer to the side of the slide than the
           margin the rest of the slide keeps

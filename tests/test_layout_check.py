@@ -1212,6 +1212,40 @@ class TestARightToLeftDeckOnMac:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+class TestGradientsAndThemesChangedByHand:
+    # Text on gradients: on Windows, Slice's background at 102 degrees and a
+    # card filled black to white with ppt_set_fill; on the Mac, a dark
+    # background gradient and a pale card, read without an angle. And a deck
+    # whose light1 was set dark with ppt_set_theme_colors, on both.
+    def test_each_slide_reports_what_its_preview_shows(self):
+        assert findings_by_slide(recorded("gradientdeck_broken_win")) == {
+            1: [("low_contrast", "TextBox 1"),          # a grey note on the deep blue
+                ("low_contrast", "TextBox 3")],         # white on the pale top
+            2: [("low_contrast", "TextBox 2")],         # dark words on the card's black end
+        }
+        assert findings_by_slide(recorded("gradientdeck_broken_mac")) == {
+            1: [("low_contrast", "TextBox 1")],         # dark grey on a dark gradient
+            2: [("low_contrast", "TextBox 2")],         # white on a pale one
+        }
+
+    def test_windows_reads_the_angle_and_the_mac_cannot(self):
+        win = recorded("gradientdeck_broken_win")["slides"][0]["background_gradient"]
+        mac = recorded("gradientdeck_broken_mac")["slides"][0]["background_gradient"]
+        assert win["angle"] == 102.0 and mac["angle"] is None
+
+    def test_the_title_of_a_theme_changed_by_hand_is_reported_on_both(self):
+        for name in ("handthemedeck_broken_win", "handthemedeck_broken_mac"):
+            [found] = slide_findings(recorded(name)["slides"][0], W, H)
+            assert found["type"] == "low_contrast" and "the theme's dark1" in found["fix"]
+
+    def test_the_fixed_decks_are_clean(self):
+        for name in ("gradientdeck_fixed_win", "gradientdeck_fixed_mac",
+                     "handthemedeck_fixed_win", "handthemedeck_fixed_mac"):
+            fixed = recorded(name)
+            assert all(found == [] for found in findings_by_slide(fixed).values()), name
+            assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+
+
 class TestADeckOnTwoDesigns:
     # Office Theme on slides 1-3 and Retrospect on 4-5, on Windows. Each design
     # has a "Title Only" layout of its own, and each styles its title its own

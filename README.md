@@ -292,7 +292,7 @@ Auto-fix strategies include widening text boxes and inserting soft returns.
 - **Off the slide** — a shape, or its text, reaching past a slide edge
 - **Overflow** — text that needs more room than its box gives it
 - **Overlap** — text running into another shape or into other text, text over a table's cells or hidden under a card laid over it, and anything a slide adds running into the template's own graphics: its logo, a band down the side, a footer line
-- **Low contrast** — text against what is behind it, below the WCAG minimum for its size
+- **Low contrast** — text against what is behind it, below the WCAG minimum for its size, on a gradient too
 - **Cramped text** — text on a card pressed against one of its edges
 - **Narrow margin** — a shape closer to the side of the slide than the margin the rest of the slide keeps
 - **Misaligned** — edges a few points apart that were meant to line up
@@ -303,7 +303,7 @@ Auto-fix strategies include widening text boxes and inserting soft returns.
 
 Each issue names the shapes and says how to fix it, with the tool call and its values. A fix keeps the slide together rather than only clearing the issue: a card grows with its padding and the rest of its row, and a shape brought back onto the slide keeps the slide's margin. The tools that add, copy, move, resize, align, distribute or retext a shape, or fill a placeholder, also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it. A new slide background, or a new fill under text, reports the text it left hard to read, and a change to the whole deck, its theme, theme colours, fonts or slide size, reports what it broke that was not broken before.
 
-On a deck made from a template, the template is part of the check. The graphics its slide master and layouts draw are read, so a chart sized over the logo or a footnote on the confidentiality line is reported, and what the template designed is taken as meant: a placeholder still in the theme's colours, or a caption layout's own smaller title, is not held to the rest, and in a deck on two designs each design's titles are compared only with each other. Theme colours set with `ppt_set_theme_colors` are the caller's, so that call judges the placeholders in them too. PowerPoint for Mac exposes the master's graphics but not a layout's own, so there a layout's design is allowed for through its placeholders.
+On a deck made from a template, the template is part of the check. The graphics its slide master and layouts draw are read, so a chart sized over the logo or a footnote on the confidentiality line is reported, and what the template designed is taken as meant: a placeholder still in the theme's colours, or a caption layout's own smaller title, is not held to the rest, and in a deck on two designs each design's titles are compared only with each other. Theme colours set with `ppt_set_theme_colors` are the caller's, so that call judges the placeholders in them too, and so does every later check once the theme's own text colour no longer reads on its background. PowerPoint for Mac exposes the master's graphics but not a layout's own, so there a layout's design is allowed for through its placeholders.
 
 ## ⚙️ Advanced Configuration
 
