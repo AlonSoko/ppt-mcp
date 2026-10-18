@@ -288,6 +288,7 @@ mcp = _PowerPointServer(
 5. For visual symbols, `ppt_search_icons` + `ppt_add_svg_icon` produce crisper, scalable results than emoji characters and are generally preferred in presentations.
 6. Use `ppt_get_slide_preview` to visually inspect slides as you work.
 7. The tools that add, copy, move, resize or retext a shape, or fill a placeholder, check what they touched and report any problem in their result under `layout_issues`, each with a `fix` naming the call and its values: act on them before moving on. When a slide is finished, run `ppt_check_layout` on it, and before calling the deck done, run it once more with no `slide_index`, which also compares the titles across slides. A slide is done when it reports no issues. The check measures rather than looks, so it works with or without image input.
+8. Build a slide at a time, not the whole deck at once. Before the first shape, fix the grid (margins, column positions, a type scale and a palette) and keep every shape on it: most alignment issues are coordinates a few points apart. Decide on photos up front, since adding them later changes the layout. Finish each slide, with its `layout_issues` acted on, `ppt_check_layout` clean and a preview checked if you can see images, before starting the next. Fix problems in place with the call each `fix` names. Deleting and rebuilding a slide or the deck to move something a few points costs many calls and finds the same problems again.
 
 ## Key tools
 
