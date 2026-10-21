@@ -1721,11 +1721,25 @@ def _restore_run_formatting(text_range, runs):
                 logger.debug("Failed to restore NameFarEast: %s", e)
 
 
+def _set_complex_script_font(font, font_name):
+    """Set the font Hebrew and Arabic are drawn in, as Name does for Latin.
+
+    PowerPoint draws right-to-left letters in the run's complex script font,
+    so without this a Hebrew title asked for in David is drawn in the
+    theme's font.
+    """
+    try:
+        font.NameComplexScript = font_name
+    except Exception as e:
+        logger.debug("Failed to set NameComplexScript: %s", e)
+
+
 def _apply_font_props(font, font_name, font_name_fareast, font_size, bold, italic, underline, color, font_color_theme):
     """Apply font properties to a Font COM object."""
     if font_name is not None:
         font.Name = font_name
         font.NameFarEast = font_name  # default: match Latin unless overridden
+        _set_complex_script_font(font, font_name)
     if font_name_fareast is not None:
         font.NameFarEast = font_name_fareast  # override East Asian font independently
     if font_size is not None:

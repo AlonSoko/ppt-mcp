@@ -3022,3 +3022,59 @@ class TestTitleEdge:
         "rtldeck_fixed_mac": [3, 7], "rtldeck_fixed_win": [3, 7],
         "themedeck_fixed_mac": [9], "wispdeck_fixed_win": [3],
     }
+
+
+# ---------------------------------------------------------------------------
+# Fonts this computer does not have, or does not draw with
+# ---------------------------------------------------------------------------
+def styled(name, top, font, content="Quarterly results", **text_extra):
+    box = textbox(name, 100, top, 600, 40, runs=[
+        {"color_hex": "#222222", "size": 20.0, "bold": False, "font": font}])
+    box["text"]["content"] = content
+    box["text"].update(text_extra)
+    return box
+
+
+class TestFonts:
+    def test_a_font_not_installed_is_reported_with_the_slides_own_font(self):
+        page = slide(styled("body", 100, "Calibri"), styled("title", 30, "Frutiger Next Pro"))
+        layout_check._with_fonts([page], lambda: frozenset({"calibri"}))
+        [finding] = slide_findings(page, W, H)
+        assert finding["type"] == "font_missing" and finding["shapes"] == ["title"]
+        assert "ppt_format_text font_name='Calibri'" in finding["fix"]
+
+    def test_a_theme_font_is_not_judged(self):
+        page = slide(styled("body", 100, "+mn-lt"))
+        layout_check._with_fonts([page], lambda: frozenset({"calibri"}))
+        assert slide_findings(page, W, H) == []
+
+    def test_the_list_is_not_read_when_no_text_names_a_font(self):
+        page = slide(card("c", 10, 10, 50, 50))
+        layout_check._with_fonts([page], lambda: pytest.fail("read the fonts"))
+
+    def test_hebrew_drawn_in_another_font_than_asked_is_reported(self):
+        page = slide(styled("title", 30, "David", content="תולדות ישראל", script_font="Arial"))
+        [finding] = slide_findings(page, W, H)
+        assert finding["message"].startswith("The Hebrew in 'title' is drawn in 'Arial', not 'David'")
+        assert finding["fix"].startswith("Set the font again (ppt_format_text font_name='David')")
+
+    def test_hebrew_in_the_font_asked_for_is_not(self):
+        page = slide(styled("title", 30, "David", content="תולדות ישראל", script_font="David"))
+        assert slide_findings(page, W, H) == []
+
+
+class TestFontNames:
+    def test_a_font_files_names_are_read(self):
+        from utils.fonts import font_names
+
+        def record(name_id, text):
+            return struct.pack(">HHHHHH", 3, 1, 0x409, name_id, len(text.encode("utf-16-be")), 0), text.encode("utf-16-be")
+
+        entries, strings = [], b""
+        for name_id, text in ((1, "Calibri Light"), (16, "Calibri")):
+            head, raw = record(name_id, text)
+            entries.append(head[:10] + struct.pack(">H", len(strings)))
+            strings += raw
+        table = struct.pack(">HHH", 0, len(entries), 6 + 12 * len(entries)) + b"".join(entries) + strings
+        font = struct.pack(">IHHHH", 0x00010000, 1, 0, 0, 0) + b"name" + struct.pack(">III", 0, 28, len(table)) + table
+        assert font_names(font) == {"Calibri Light", "Calibri"}

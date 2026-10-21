@@ -212,14 +212,15 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
-    "text_direction", "stretched_picture", "title_edge",
+    "text_direction", "stretched_picture", "title_edge", "font_missing",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "title_edge", "uneven_spacing", "uneven_sizes",
-    "number_order", "text_direction", "empty_placeholder", "sample_text", "chart_sample_data",
+    "number_order", "text_direction", "font_missing", "empty_placeholder", "sample_text",
+    "chart_sample_data",
     "inconsistent_titles",
     "inconsistent_body_text",
 )
@@ -3112,6 +3113,62 @@ def _chart_sample_data(slide_index, shapes):
     return findings
 
 
+def _fonts(slide_index, shapes):
+    """Text set in a font this computer does not have, or drawn in another.
+
+    PowerPoint draws a font it cannot find in a stand-in, and says nothing:
+    the deck looks right where it was made and different here. Hebrew and
+    Arabic are drawn in the run's right-to-left font, which setting a font
+    by name left as it was, so a title asked for in David showed in the
+    theme's font. That one is known only on Windows, where it can be read.
+    """
+    findings = []
+    usual = {}
+    for shape in shapes:
+        text = shape.get("text") or {}
+        missing = set(text.get("missing_fonts") or [])
+        for run in text.get("runs") or []:
+            if run.get("font") and run["font"] not in missing and not run["font"].startswith("+"):
+                usual[run["font"]] = usual.get(run["font"], 0) + 1
+    for shape in shapes:
+        text = shape.get("text") or {}
+        if not shape.get("visible", True) or not text.get("chars"):
+            continue
+        name = shape["name"]
+        missing = text.get("missing_fonts") or []
+        if missing:
+            listed = ", ".join(f"'{f}'" for f in missing)
+            instead = max(usual, key=usual.get) if usual else None
+            use = (f"ppt_format_text font_name='{instead}', the slide's own font"
+                   if instead else "ppt_format_text font_name= one the rest of the deck uses")
+            findings.append(_finding(
+                slide_index, "font_missing", [name],
+                f"'{name}' asks for {listed}, which this computer does not have, "
+                "so PowerPoint draws it in a stand-in font here, as it will on "
+                "any computer without it.",
+                f"Set it in a font that is installed ({use}), or install {listed} "
+                "on every computer that will show the deck.",
+                severity="warning", fonts=missing,
+            ))
+            continue
+        fonts = {run.get("font") for run in text.get("runs") or [] if run.get("font")}
+        drawn = text.get("script_font")
+        if (len(fonts) == 1 and drawn and not drawn.startswith("+")
+                and drawn.lower() != next(iter(fonts)).lower()):
+            asked = next(iter(fonts))
+            script = _script(text.get("content") or "") or "right-to-left"
+            findings.append(_finding(
+                slide_index, "font_missing", [name],
+                f"The {script} in '{name}' is drawn in '{drawn}', not '{asked}': "
+                f"PowerPoint draws right-to-left letters in a font of their own, "
+                f"and only the Latin one was set to '{asked}'.",
+                f"Set the font again (ppt_format_text font_name='{asked}'), which "
+                "sets it for right-to-left letters too.",
+                severity="warning", fonts=[asked],
+            ))
+    return findings
+
+
 def _empty_placeholders(slide_index, shapes):
     findings = []
     for shape in shapes:
@@ -3160,6 +3217,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
         + _chart_sample_data(index, shapes)
+        + _fonts(index, shapes)
         + _stretched(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
@@ -3894,6 +3952,11 @@ def _text_facts(shape, full):
     ]
     if has_right_to_left(content):
         facts["directions"] = _directions(tr)
+        try:
+            # The font Hebrew and Arabic are drawn in; "" when the runs differ.
+            facts["script_font"] = tr.Font.NameComplexScript or None
+        except Exception:
+            pass
     return facts
 
 
@@ -4282,6 +4345,70 @@ def _package_facts_impl(slide_indices, charts=False):
             os.remove(path)
 
 
+_FONTS = {}
+
+
+def _installed_fonts_impl():
+    """The names of the fonts PowerPoint can draw with on this computer.
+
+    The fonts Windows has, by family, and the Office cloud fonts already
+    downloaded. Read once: fonts installed later are seen after a restart.
+    """
+    if "installed" in _FONTS:
+        return _FONTS["installed"]
+    import win32gui
+    from utils.fonts import names_in_folder
+
+    names = set()
+
+    def add(font, *_):
+        names.add(font.lfFaceName)
+        return 1
+
+    hdc = win32gui.GetDC(0)
+    try:
+        win32gui.EnumFontFamilies(hdc, None, add)
+    finally:
+        win32gui.ReleaseDC(0, hdc)
+    cloud = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "FontCache",
+                         "4", "CloudFonts")
+    if os.path.isdir(cloud):
+        for family in os.listdir(cloud):
+            names.add(family)
+            names |= names_in_folder(os.path.join(cloud, family))
+    _FONTS["installed"] = frozenset(n.lower() for n in names if n)
+    return _FONTS["installed"]
+
+
+def _with_fonts(slides, installed):
+    """Name the fonts each shape asks for that this computer does not have.
+
+    ``installed`` is called for the list only when some text names a font.
+    """
+    if not any(run.get("font") for slide in slides for shape in slide["shapes"]
+               for run in (shape.get("text") or {}).get("runs") or []):
+        return
+    installed = installed()
+    if not installed:
+        return
+    for slide in slides:
+        for shape in slide["shapes"]:
+            text = shape.get("text") or {}
+            asked = {run.get("font") for run in text.get("runs") or [] if run.get("font")}
+            missing = sorted(f for f in asked
+                             if not f.startswith("+") and f.lower() not in installed)
+            if missing:
+                text["missing_fonts"] = missing
+
+
+def _read_fonts():
+    try:
+        return ppt.execute(_installed_fonts_impl)
+    except Exception:
+        logger.debug("Cannot list the installed fonts", exc_info=True)
+        return None
+
+
 def _has_pictures(slides, names=None):
     return any(s.get("type") in _PICTURES and (names is None or s["name"] in names)
                for slide in slides for s in slide["shapes"])
@@ -4339,6 +4466,7 @@ def check_layout(params: CheckLayoutInput) -> str:
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
         if _has_pictures(slides) or _has_charts(slides):
             _with_package(slides, _read_package(indices, charts=_has_charts(slides)))
+        _with_fonts(slides, _read_fonts)
         findings = []
         for slide in slides:
             findings += slide_findings(slide, slide_w, slide_h)
@@ -4376,6 +4504,7 @@ def _issues_for(slide_index, shapes, aspects=None):
         read = _read_package([slide_index]).get("pictures") or {}
         known = {**read.get(slide_index, {}), **known}
     _with_package(slides, {"pictures": {slide_index: known}})
+    _with_fonts(slides, _read_fonts)
     return slide_findings(slides[0], facts["slide_width"], facts["slide_height"],
                           only=names)
 

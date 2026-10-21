@@ -18,6 +18,7 @@ from utils.redraw import FrozenRedraw
 from utils.validation import font_size_warning
 from ppt_com.shape_lookup import resolve_shape, walk_group_children
 from ppt_com.layout_check import report_layout, touched_names
+from ppt_com.text import _set_complex_script_font
 from ppt_com.constants import (
     SHAPE_TYPE_NAMES,
     msoTrue, msoFalse, msoTriStateMixed,
@@ -705,6 +706,7 @@ def _apply_shape_attrs(
             if font_name is not None:
                 font.Name = font_name
                 font.NameFarEast = font_name
+                _set_complex_script_font(font, font_name)
             if font_size is not None:
                 font.Size = font_size
             if bold is not None:
@@ -801,6 +803,7 @@ def _add_textbox_impl(
         if font_name is not None:
             font.Name = font_name
             font.NameFarEast = font_name  # East Asian characters (e.g. Japanese)
+            _set_complex_script_font(font, font_name)
         if font_size is not None:
             font.Size = font_size
         if bold is not None:

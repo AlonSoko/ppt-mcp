@@ -163,7 +163,7 @@ def _run_styles(text_range) -> list:
     Most text is set in one style, and the range's own font record answers
     that in one event: a property the characters disagree on reads back as
     ``missing value``, so a record with all three is the whole answer. Mixed
-    text is read as columns, five events however long it is, and when
+    text is read as columns, six events however long it is, and when
     PowerPoint will not answer per character either, nothing is guessed.
     """
     font = _record(text_range.font)
@@ -181,7 +181,7 @@ def _run_styles(text_range) -> list:
         texts = chars.content.get()
         font = chars.font
         columns = [font.font_color.get(), font.font_size.get(), font.bold.get(),
-                   font.font_color_theme_index.get()]
+                   font.font_color_theme_index.get(), font.font_name.get()]
         if not isinstance(texts, list) or any(
             not isinstance(column, list) or len(column) != len(texts)
             for column in columns
@@ -193,21 +193,21 @@ def _run_styles(text_range) -> list:
         return []
 
     styles = set()
-    for char, colour, size, bold, index in rows:
+    for char, colour, size, bold, index, name in rows:
         if not isinstance(char, str) or not char.strip():
             continue
-        colour, size = _value(colour), _value(size)
+        colour, size, name = _value(colour), _value(size), _value(name)
         styles.add((
             rgb_list_to_hex(colour) if isinstance(colour, list) else None,
             round(size, 1) if isinstance(size, (int, float)) else None,
             _value(bold) is True,
             _theme_flag(index),
+            name if isinstance(name, str) else None,
         ))
-    # The typeface would cost one more event per column; mixed text leaves it
-    # unknown rather than guessed.
     return [
-        {"color_hex": colour, "size": size, "bold": bold, "font": None, "theme": theme}
-        for colour, size, bold, theme in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
+        {"color_hex": colour, "size": size, "bold": bold, "font": name, "theme": theme}
+        for colour, size, bold, theme, name in sorted(
+            styles, key=lambda s: (s[0] or "", s[1] or 0, s[4] or ""))
     ]
 
 
@@ -546,3 +546,39 @@ def _charts_by_clipboard(pres, slide_indices):
                                             "series": read["series"]}
         found[index] = data
     return found
+
+
+_FONTS = {}
+
+
+def _installed_fonts_impl():
+    """The macOS half of ppt_com.layout_check._installed_fonts_impl.
+
+    The system's fonts, the Office fonts PowerPoint for Mac carries inside
+    its own bundle, where the system's list does not see them, and the
+    Office cloud fonts already downloaded.
+    """
+    if "installed" in _FONTS:
+        return _FONTS["installed"]
+    import os
+
+    from AppKit import NSFontManager
+
+    from utils.fonts import names_in_folder
+
+    names = set()
+    manager = NSFontManager.sharedFontManager()
+    for family in manager.availableFontFamilies() or []:
+        names.add(str(family))
+        for member in manager.availableMembersOfFontFamily_(family) or []:
+            names.add(f"{family} {member[1]}")
+    bundle = "/Applications/Microsoft PowerPoint.app/Contents/Resources/DFonts"
+    names |= names_in_folder(bundle)
+    cloud = os.path.expanduser(
+        "~/Library/Group Containers/UBF8T346G9.Office/FontCache/4/CloudFonts")
+    if os.path.isdir(cloud):
+        for family in os.listdir(cloud):
+            names.add(family)
+            names |= names_in_folder(os.path.join(cloud, family))
+    _FONTS["installed"] = frozenset(n.lower() for n in names if n)
+    return _FONTS["installed"]
