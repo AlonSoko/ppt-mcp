@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import re
+import unicodedata
 from itertools import pairwise
 from typing import Optional
 
@@ -204,14 +205,14 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 # allowed to be unfinished, so those wait for ppt_check_layout.
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
-    "narrow_margin", "misaligned", "uneven_sizes", "sample_text",
+    "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
-    "empty_placeholder", "sample_text", "inconsistent_titles",
+    "number_order", "empty_placeholder", "sample_text", "inconsistent_titles",
 )
 
 
@@ -960,6 +961,12 @@ def _overflow(slide_index, shapes, layout):
             room = measurement["usable_width_pt"]
         elif needed is not None and room is not None and needed <= room + 0.5:
             # Wrapping is off and the overflow is a line too long for the box.
+            if text.get("autofit") == "shape_to_fit":
+                # A box sized to its text is as wide as its longest line, so a
+                # line cannot run out of its side. A Hebrew or Arabic line read
+                # wider than the box is PowerPoint for Mac reporting it up to
+                # 11 pt wider than it draws it (see text_box).
+                continue
             needed = measurement["text_width_pt"]
             room = measurement["usable_width_pt"]
             findings.append(_finding(
@@ -2604,6 +2611,115 @@ def _sample_text(slide_index, shapes):
     return findings
 
 
+# The bidi classes of letters: a paragraph takes its direction from its first
+# one. Digits have none of their own.
+_LEFT_TO_RIGHT = frozenset({"L"})
+_RIGHT_TO_LEFT = frozenset({"R", "AL"})
+_DIGITS = frozenset({"EN", "AN"})
+# A single one of these between two digits keeps them one number, "1948-1967",
+# "19.10.2026" or "1,000", in either direction.
+_JOINERS = frozenset({"ES", "CS"})
+
+# The word that makes a range read right to left, by script.
+_RANGE_WORDS = {"Hebrew": "{a} עד {b}", "Arabic": "من {a} إلى {b}"}
+
+
+def _numbers_only(line):
+    """The separate numbers in a line with no letter in it, and the text
+    between them, or None when a letter sets the line's direction.
+
+    Numbers are told apart as the bidi algorithm tells them apart: digits
+    joined by one sign or separator, "1948-1967", are one number.
+    """
+    numbers, gaps, gap = [], [], ""
+    in_number = False
+    for ch in line:
+        kind = unicodedata.bidirectional(ch)
+        if kind in _LEFT_TO_RIGHT or kind in _RIGHT_TO_LEFT:
+            return None
+        if kind in _DIGITS:
+            if in_number:
+                numbers[-1] += ch
+            elif numbers and len(gap) == 1 and unicodedata.bidirectional(gap) in _JOINERS:
+                numbers[-1] += gap + ch
+            else:
+                if numbers:
+                    gaps.append(gap)
+                numbers.append(ch)
+            in_number, gap = True, ""
+        else:
+            in_number = False
+            gap += ch
+    return numbers, gaps
+
+
+def _script(text):
+    """'Hebrew' or 'Arabic' when the text reads right to left, 'Latin' when it
+    reads left to right, None with no letters."""
+    rtl = {"Hebrew": 0, "Arabic": 0}
+    ltr = 0
+    for ch in text:
+        kind = unicodedata.bidirectional(ch)
+        if kind in _RIGHT_TO_LEFT:
+            rtl["Hebrew" if "֐" <= ch <= "׿" or "יִ" <= ch <= "ﭏ"
+                else "Arabic"] += 1
+        elif kind in _LEFT_TO_RIGHT:
+            ltr += 1
+    if not ltr and not any(rtl.values()):
+        return None
+    script = max(rtl, key=rtl.get)
+    return script if rtl[script] > ltr else "Latin"
+
+
+def _number_order(slide_index, shapes):
+    """A line of numbers only, on a slide that reads right to left.
+
+    PowerPoint gives a paragraph the direction of its first letter, and
+    digits are not letters. "1516 – 1917" on a Hebrew slide is set left to
+    right, so the start year is drawn on the left, and a reader starting on
+    the right reads the range backwards; a list of years comes out the same.
+    Marking the paragraph right to left does not change that on the Mac.
+    A word in the line does: "1516 עד 1917".
+    """
+    findings = []
+    slide_text = " ".join((s.get("text") or {}).get("content") or "" for s in shapes)
+    for shape in shapes:
+        content = (shape.get("text") or {}).get("content") or ""
+        if not content or not shape.get("visible", True):
+            continue
+        script = _script(content) or _script(slide_text)
+        if script not in _RANGE_WORDS:
+            continue
+        for line in re.split(r"[\r\n]", content):
+            line = line.strip()
+            parts = _numbers_only(line)
+            if not parts:
+                continue
+            numbers, gaps = parts
+            # Numbers set apart by spaces alone, a phone number, are read left
+            # to right in any language.
+            if len(numbers) < 2 or not any(gap.strip() for gap in gaps):
+                continue
+            name = shape["name"]
+            if len(numbers) == 2:
+                example = _RANGE_WORDS[script].format(a=numbers[0], b=numbers[1])
+                how = (f"replace it with \"{example}\" (ppt_find_replace_text "
+                       f"find_text=\"{line}\" replace_text=\"{example}\")")
+            else:
+                how = (f"start it with a {script} word, the label it belongs to "
+                       f"(ppt_find_replace_text find_text=\"{line}\")")
+            findings.append(_finding(
+                slide_index, "number_order", [name],
+                f"'{name}' has a line of numbers only, \"{line}\", on a slide "
+                f"that reads right to left. With no letter in it, PowerPoint "
+                f"sets the line left to right, so \"{numbers[0]}\" is drawn on "
+                f"the left and a {script} reader reads \"{numbers[-1]}\" first.",
+                f"Put a word in the line, so it reads right to left: {how}.",
+                line=line,
+            ))
+    return findings
+
+
 def _empty_placeholders(slide_index, shapes):
     findings = []
     for shape in shapes:
@@ -2650,6 +2766,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _off_centre_labels(index, layout)
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
+        + _number_order(index, shapes)
     )
     if only is not None:
         # Text on a touched card is drawn on its fill, so whether it can still

@@ -222,6 +222,14 @@ class TestOverflow:
         assert "wider" in finding["fix"]
         assert finding["needed_pt"] == 300
 
+    def test_an_unwrapped_box_sized_to_its_text_cannot_run_out_of_its_side(self):
+        # Live, on the Mac: "1516 עד 1917" at 44 pt, in a box PowerPoint had
+        # sized to it at 283.3 pt, was read as a 276.1 pt line, 7.3 pt past
+        # the insets. It drew inside the box.
+        box = textbox("row1", 516.7, 40, 283.3, 70, text_width=276.1, text_height=60,
+                      word_wrap=False, autofit="shape_to_fit")
+        assert [f for f in check(box) if f["type"] == "overflow"] == []
+
 
 # ---------------------------------------------------------------------------
 # Overlap
@@ -1747,6 +1755,58 @@ class TestSampleText:
         box = textbox("t", 100, 100, 400, 40)
         box["text"]["content"] = words
         assert check(box) == []
+
+
+def worded(name, top, content):
+    box = textbox(name, 100, top, 600, 40)
+    box["text"]["content"] = content
+    return box
+
+
+class TestNumberOrder:
+    """Found on the Hebrew history deck: "1516 – 1917" under a Hebrew heading
+    was drawn with 1516 on the left, so it read 1917 to 1516."""
+
+    def test_a_range_of_numbers_on_a_hebrew_slide_is_reported(self):
+        [finding] = check(worded("heading", 40, "השלטון העות'מאני"),
+                          worded("years", 100, "1516 – 1917"))
+        assert finding["type"] == "number_order"
+        assert finding["shapes"] == ["years"]
+        assert finding["line"] == "1516 – 1917"
+        assert "1516 עד 1917" in finding["fix"]
+        assert 'find_text="1516 – 1917"' in finding["fix"]
+
+    def test_a_list_of_years_is_reported(self):
+        [finding] = check(worded("heading", 40, "מלחמות"),
+                          worded("years", 100, "1948, 1967, 1973"))
+        assert "Hebrew word" in finding["fix"]
+
+    def test_an_arabic_slide_gets_an_arabic_word(self):
+        [finding] = check(worded("heading", 40, "الحكم العثماني"),
+                          worded("years", 100, "1516 – 1917"))
+        assert "من 1516 إلى 1917" in finding["fix"]
+
+    def test_one_line_of_a_shape_is_judged_on_its_own(self):
+        [finding] = check(worded("card", 40, "השלטון העות'מאני\r1516 – 1917"))
+        assert finding["line"] == "1516 – 1917"
+
+    @pytest.mark.parametrize("content", [
+        "1516 עד 1917",        # a word sets the line right to left
+        "586 לפנה״ס",
+        "1948-1967",           # one hyphen keeps it one number
+        "19.10.2026",
+        "03 123 4567",         # spaces alone: a phone number, read left to right
+        "1917",
+    ])
+    def test_lines_that_read_right_are_not(self, content):
+        assert check(worded("heading", 40, "ציר הזמן"), worded("years", 100, content)) == []
+
+    def test_an_english_slide_is_not(self):
+        assert check(worded("heading", 40, "The Ottoman years"),
+                     worded("years", 100, "1516 – 1917")) == []
+
+    def test_a_slide_of_numbers_alone_is_not_guessed_at(self):
+        assert check(worded("years", 100, "1516 – 1917")) == []
 
 
 class TestWhatAWriteCannotSee:
