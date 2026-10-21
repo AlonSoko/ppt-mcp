@@ -107,53 +107,98 @@ def _rels(archive, part):
     }
 
 
-def picture_aspects(path, slide_indices):
-    """Each picture's own proportions, width over height, as cropped.
+def _slides(archive, slide_indices):
+    """Each wanted slide's index, parsed XML and relationships."""
+    presentation = ElementTree.fromstring(archive.read("ppt/presentation.xml"))
+    targets = _rels(archive, "ppt/presentation.xml")
+    order = [targets.get(s.get(_ID))
+             for s in presentation.findall("p:sldIdLst/p:sldId", _NS)]
+    for index in slide_indices:
+        if not 1 <= index <= len(order) or not order[index - 1]:
+            continue
+        part = order[index - 1]
+        yield index, ElementTree.fromstring(archive.read(part)), _rels(archive, part)
 
-    ``{slide_index: {shape name: aspect}}``. A picture whose image cannot be
-    measured, one filled as a tile, and names used twice on a slide are left
-    out, so an absent entry always means unknown.
+
+def _unique(found, name, value, seen):
+    """Keep ``value`` under ``name`` unless the name was seen before."""
+    if name in seen:
+        found.pop(name, None)
+        return
+    seen.add(name)
+    if value is not None:
+        found[name] = value
+
+
+def _picture_aspect(archive, pic, media):
+    fill = pic.find("p:blipFill", _NS)
+    if fill is None:
+        return None
+    blip = fill.find("a:blip", _NS)
+    if blip is None or fill.find("a:tile", _NS) is not None:
+        return None
+    image = media.get(blip.get(_EMBED))
+    if not image or image not in archive.namelist():
+        return None
+    size = image_size(archive.read(image))
+    if not size or not size[0] or not size[1]:
+        return None
+    crop = fill.find("a:srcRect", _NS)
+    cut = {side: 0.0 for side in "ltrb"}
+    if crop is not None:
+        for side in "ltrb":
+            cut[side] = int(crop.get(side, "0")) / 100000
+    width = size[0] * (1 - cut["l"] - cut["r"])
+    height = size[1] * (1 - cut["t"] - cut["b"])
+    return width / height if width > 0 and height > 0 else None
+
+
+def _chart(archive, frame, parts):
+    from gvml import PackageError
+    from gvml.charts import read_chart
+
+    chart = frame.find("a:graphic/a:graphicData/c:chart", {**_NS, "c": _CHART})
+    if chart is None:
+        return None
+    part = parts.get(chart.get(_ID))
+    if not part or part not in archive.namelist():
+        return None
+    try:
+        return read_chart(archive.read(part))
+    except (PackageError, ElementTree.ParseError):
+        return None
+
+
+_CHART = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+
+
+def package_facts(path, slide_indices):
+    """What the saved file says that PowerPoint will not.
+
+    ``{"pictures": {slide: {name: aspect}}, "charts": {slide: {name: data}}}``.
+    A picture's aspect is its image's width over its height, as cropped; a
+    chart's data is what ``gvml.charts.read_chart`` reads. A picture whose
+    image cannot be measured, one filled as a tile, and names used twice on
+    a slide are left out, so an absent entry always means unknown.
     """
-    found = {}
+    pictures, charts = {}, {}
     with zipfile.ZipFile(path) as archive:
-        presentation = ElementTree.fromstring(archive.read("ppt/presentation.xml"))
-        targets = _rels(archive, "ppt/presentation.xml")
-        order = [targets.get(s.get(_ID))
-                 for s in presentation.findall("p:sldIdLst/p:sldId", _NS)]
-        for index in slide_indices:
-            if not 1 <= index <= len(order) or not order[index - 1]:
-                continue
-            part = order[index - 1]
-            slide = ElementTree.fromstring(archive.read(part))
-            media = _rels(archive, part)
-            aspects, seen = {}, set()
-            for pic in slide.iter("{%s}pic" % _NS["p"]):
-                props = pic.find("p:nvPicPr/p:cNvPr", _NS)
-                fill = pic.find("p:blipFill", _NS)
-                if props is None or fill is None:
-                    continue
-                name = props.get("name")
-                if name in seen:
-                    aspects.pop(name, None)
-                    continue
-                seen.add(name)
-                blip = fill.find("a:blip", _NS)
-                if blip is None or fill.find("a:tile", _NS) is not None:
-                    continue
-                image = media.get(blip.get(_EMBED))
-                if not image or image not in archive.namelist():
-                    continue
-                size = image_size(archive.read(image))
-                if not size or not size[0] or not size[1]:
-                    continue
-                crop = fill.find("a:srcRect", _NS)
-                cut = {side: 0.0 for side in "ltrb"}
-                if crop is not None:
-                    for side in "ltrb":
-                        cut[side] = int(crop.get(side, "0")) / 100000
-                width = size[0] * (1 - cut["l"] - cut["r"])
-                height = size[1] * (1 - cut["t"] - cut["b"])
-                if width > 0 and height > 0:
-                    aspects[name] = width / height
-            found[index] = aspects
-    return found
+        for index, slide, parts in _slides(archive, slide_indices):
+            aspects, data, seen = {}, {}, set()
+            for element in slide.iter():
+                if element.tag == "{%s}pic" % _NS["p"]:
+                    props = element.find("p:nvPicPr/p:cNvPr", _NS)
+                    if props is not None:
+                        _unique(aspects, props.get("name"),
+                                _picture_aspect(archive, element, parts), seen)
+                elif element.tag == "{%s}graphicFrame" % _NS["p"]:
+                    props = element.find("p:nvGraphicFramePr/p:cNvPr", _NS)
+                    if props is not None:
+                        _unique(data, props.get("name"), _chart(archive, element, parts), seen)
+            pictures[index], charts[index] = aspects, data
+    return {"pictures": pictures, "charts": charts}
+
+
+def picture_aspects(path, slide_indices):
+    """Each picture's own proportions: ``package_facts``'s pictures."""
+    return package_facts(path, slide_indices)["pictures"]

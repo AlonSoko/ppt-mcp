@@ -500,25 +500,49 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     return facts
 
 
-def _picture_aspects_impl(slide_indices):
-    """The macOS half of ppt_com.layout_check._picture_aspects_impl.
+def _package_facts_impl(slide_indices, charts=False):
+    """The macOS half of ppt_com.layout_check._package_facts_impl.
 
     PowerPoint for Mac has no way to save a copy aside: saving to another
     path moves the open deck to it. So the deck's own file is read, and only
-    while it holds what is on screen. A deck never saved, or changed since,
-    answers nothing, and its pictures go unjudged.
+    while it holds what is on screen. Otherwise the pictures go unjudged, and
+    with ``charts`` each chart is read the way ppt_get_chart_data reads it,
+    through the clipboard, which is put back afterwards.
     """
-    from ppt_com.layout_check import picture_aspects
+    from ppt_com.layout_check import package_facts
     from ppt_mac.presentation import _local_path
 
     pres = ppt._get_pres_impl()
     try:
-        if not pres.saved():
-            return {}
-        path = _local_path(pres.full_name())
+        path = _local_path(pres.full_name()) if pres.saved() else None
     except Exception:
         logger.debug("Cannot tell whether the deck is saved", exc_info=True)
+        path = None
+    if path and path.lower().endswith((".pptx", ".pptm", ".potx", ".ppsx")):
+        return package_facts(path, slide_indices)
+    if not charts:
         return {}
-    if not path or not path.lower().endswith((".pptx", ".pptm", ".potx", ".ppsx")):
-        return {}
-    return picture_aspects(path, slide_indices)
+    return {"charts": _charts_by_clipboard(pres, slide_indices)}
+
+
+def _charts_by_clipboard(pres, slide_indices):
+    from ppt_com.constants import msoChart
+    from ppt_mac.charts import _get_chart_data_impl
+    from ppt_mac.shapes import _WIN_SHAPE_TYPE, _win_constant
+
+    found = {}
+    for index in slide_indices:
+        data = {}
+        for shape in shapes_of(_slide(pres, index)):
+            try:
+                if _win_constant(_WIN_SHAPE_TYPE, shape.shape_type()) != msoChart:
+                    continue
+                read = _get_chart_data_impl(index, shape.name())
+            except Exception:
+                logger.debug("Cannot read a chart's data", exc_info=True)
+                continue
+            if read.get("success"):
+                data[read["shape_name"]] = {"categories": read["categories"],
+                                            "series": read["series"]}
+        found[index] = data
+    return found

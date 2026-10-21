@@ -2870,3 +2870,65 @@ class TestBodyTextSizes:
             deck = json.loads(path.read_text(encoding="utf-8"))
             found = layout_check._body_sizes(deck["slides"], deck["slide_width"], deck["slide_height"])
             assert found == [], path.name
+
+
+# ---------------------------------------------------------------------------
+# Charts left with sample data
+# ---------------------------------------------------------------------------
+from ppt_com.constants import msoChart  # noqa: E402
+
+
+def chart_shape(categories, series):
+    facts = shape("Chart 3", 100, 100, 500, 300, type=msoChart)
+    facts["chart"] = {"categories": categories, "series": series}
+    return facts
+
+
+class TestChartSampleData:
+    def test_a_new_chart_is_reported(self):
+        [finding] = check(chart_shape(
+            ["Category 1", "Category 2", "Category 3", "Category 4"],
+            [{"name": "Series 1", "values": [4.3, 2.5, 3.5, 4.5]}]))
+        assert finding["type"] == "chart_sample_data"
+        assert "categories named 'Category 1'" in finding["message"]
+        assert "series named 'Series 1'" in finding["message"]
+        assert "sample numbers" in finding["message"]
+
+    def test_real_numbers_under_sample_names_are_still_reported(self):
+        [finding] = check(chart_shape(
+            ["North", "South"], [{"name": "Series 1", "values": [12.0, 30.0]}]))
+        assert finding["message"].endswith("series named 'Series 1'.")
+
+    def test_a_finished_chart_is_not(self):
+        assert check(chart_shape(["Q1", "Q2"], [{"name": "Revenue", "values": [12.0, 30.0]}])) == []
+
+    def test_a_chart_whose_data_is_unknown_is_not_judged(self):
+        assert check(shape("Chart 3", 100, 100, 500, 300, type=msoChart)) == []
+
+
+def test_a_chart_in_the_file_is_read(tmp_path):
+    chart_xml = (
+        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea>'
+        '<c:barChart><c:ser><c:tx><c:strRef><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Series 1</c:v></c:pt>'
+        '</c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Category 1</c:v></c:pt>'
+        '</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>4.3</c:v></c:pt>'
+        '</c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>')
+    frame = ('<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="5" name="Chart 3"/></p:nvGraphicFramePr>'
+             '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+             '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId9"/>'
+             '</a:graphicData></a:graphic></p:graphicFrame>')
+    path = deck_file(tmp_path, [frame], {})
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("ppt/charts/chart1.xml", chart_xml)
+        rels = archive.read("ppt/slides/_rels/slide1.xml.rels").decode()
+    # Rewrite the slide's relationships with the chart in them.
+    entries = {n: zipfile.ZipFile(path).read(n) for n in zipfile.ZipFile(path).namelist()}
+    entries["ppt/slides/_rels/slide1.xml.rels"] = rels.replace(
+        "</Relationships>", '<Relationship Id="rId9" Target="../charts/chart1.xml" Type="chart"/></Relationships>').encode()
+    with zipfile.ZipFile(path, "w") as archive:
+        for n, data in entries.items():
+            archive.writestr(n, data)
+    from utils.package import package_facts
+    chart = package_facts(path, [1])["charts"][1]["Chart 3"]
+    assert chart["categories"] == ["Category 1"] and chart["series"][0]["name"] == "Series 1"

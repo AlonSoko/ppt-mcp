@@ -36,7 +36,7 @@ from backend import ppt
 from utils.color import int_to_hex
 from utils.navigation import goto_slide
 from utils.offload import run_offloaded
-from utils.package import picture_aspects
+from utils.package import package_facts, picture_aspects  # noqa: F401
 from ppt_com.constants import (
     msoChart, msoEmbeddedOLEObject, msoFillGradient, msoFillSolid, msoGroup, msoLine,
     msoLinkedOLEObject, msoLinkedPicture, msoMedia, msoPicture,
@@ -219,7 +219,8 @@ SHAPE_FINDINGS = frozenset({
 _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
-    "number_order", "text_direction", "empty_placeholder", "sample_text", "inconsistent_titles",
+    "number_order", "text_direction", "empty_placeholder", "sample_text", "chart_sample_data",
+    "inconsistent_titles",
     "inconsistent_body_text",
 )
 
@@ -2960,6 +2961,60 @@ def _stretched(slide_index, shapes):
     return findings
 
 
+# The names PowerPoint gives a new chart's categories and series.
+_SAMPLE_CATEGORY = re.compile(r"^(?:Category \d+|[1-4](?:st|nd|rd|th) Qtr)$")
+_SAMPLE_SERIES = re.compile(r"^(?:Series \d+|Y Values)$")
+
+
+def _sample_values():
+    from gvml.charts import (
+        DEFAULT_BUBBLE_SERIES, DEFAULT_PIE_SERIES, DEFAULT_SERIES, DEFAULT_XY_SERIES,
+    )
+    return [tuple(s["values"]) for s in
+            DEFAULT_SERIES + DEFAULT_PIE_SERIES + DEFAULT_XY_SERIES + DEFAULT_BUBBLE_SERIES]
+
+
+def _chart_sample_data(slide_index, shapes):
+    """A chart still showing the data PowerPoint put in it.
+
+    A new chart comes with four categories named "Category 1" to 4, series
+    named "Series 1" to 3, and made-up numbers. A model fills in the series
+    and forgets the names, or adds a chart and moves on; either way the
+    chart reads as a placeholder.
+    """
+    findings = []
+    samples = None
+    for shape in shapes:
+        chart = shape.get("chart")
+        if not chart or not shape.get("visible", True):
+            continue
+        if samples is None:
+            samples = _sample_values()
+        left = []
+        categories = [c for c in chart.get("categories") or [] if _SAMPLE_CATEGORY.match(c or "")]
+        if categories:
+            left.append("categories named " + ", ".join(f"'{c}'" for c in categories[:4]))
+        series = chart.get("series") or []
+        names = [s.get("name") for s in series if _SAMPLE_SERIES.match(s.get("name") or "")]
+        if names:
+            left.append("series named " + ", ".join(f"'{n}'" for n in names[:3]))
+        numbers = [s.get("name") for s in series
+                   if tuple(round(v, 4) for v in s.get("values") or [] if v is not None) in samples]
+        if numbers:
+            left.append("PowerPoint's sample numbers")
+        if not left:
+            continue
+        name = shape["name"]
+        findings.append(_finding(
+            slide_index, "chart_sample_data", [name],
+            f"The chart '{name}' still has the data PowerPoint puts in a new "
+            f"chart: {'; '.join(left)}.",
+            f"Put the real data in it (ppt_set_chart_data on '{name}', with "
+            "the categories and every series named), or delete the chart.",
+        ))
+    return findings
+
+
 def _empty_placeholders(slide_index, shapes):
     findings = []
     for shape in shapes:
@@ -3006,6 +3061,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _off_centre_labels(index, layout)
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
+        + _chart_sample_data(index, shapes)
         + _stretched(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
@@ -4103,11 +4159,12 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     return facts
 
 
-def _picture_aspects_impl(slide_indices):
-    """Each picture's own proportions, from a copy of the deck saved aside.
+def _package_facts_impl(slide_indices, charts=False):
+    """``package_facts`` for the slides, from a copy of the deck saved aside.
 
     ``SaveCopyAs`` leaves the open deck as it was: not marked as changed,
-    nothing to undo.
+    nothing to undo. ``charts`` is for the macOS reader, which reads them
+    another way when the file cannot be used.
     """
     pres = ppt._get_pres_impl()
     try:
@@ -4121,7 +4178,7 @@ def _picture_aspects_impl(slide_indices):
     os.remove(path)
     try:
         pres.SaveCopyAs(path)
-        return picture_aspects(path, slide_indices)
+        return package_facts(path, slide_indices)
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -4132,21 +4189,30 @@ def _has_pictures(slides, names=None):
                for slide in slides for s in slide["shapes"])
 
 
-def _with_aspects(slides, aspects):
-    """Give each picture the proportions of its image, where they are known."""
+def _has_charts(slides):
+    return any(s.get("type") == msoChart for slide in slides for s in slide["shapes"])
+
+
+def _with_package(slides, facts):
+    """Give each picture its image's proportions and each chart its data,
+    where they are known."""
     for slide in slides:
-        known = aspects.get(slide["slide_index"]) or {}
+        index = slide["slide_index"]
+        aspects = (facts.get("pictures") or {}).get(index) or {}
+        charts = (facts.get("charts") or {}).get(index) or {}
         for shape in slide["shapes"]:
-            if shape.get("type") in _PICTURES and shape["name"] in known:
-                shape["natural_aspect"] = known[shape["name"]]
+            if shape.get("type") in _PICTURES and shape["name"] in aspects:
+                shape["natural_aspect"] = aspects[shape["name"]]
+            elif shape.get("type") == msoChart and shape["name"] in charts:
+                shape["chart"] = charts[shape["name"]]
 
 
-def _read_aspects(indices):
-    """``_picture_aspects_impl`` for the slides, or nothing when it fails."""
+def _read_package(indices, charts=False):
+    """``_package_facts_impl`` for the slides, or nothing when it fails."""
     try:
-        return ppt.execute(_picture_aspects_impl, indices) or {}
+        return ppt.execute(_package_facts_impl, indices, charts) or {}
     except Exception:
-        logger.debug("Cannot read the pictures' own proportions", exc_info=True)
+        logger.debug("Cannot read the saved deck", exc_info=True)
         return {}
 
 
@@ -4173,8 +4239,8 @@ def check_layout(params: CheckLayoutInput) -> str:
         if facts is None:  # a deck with no slides
             return json.dumps({"issues": [], "total": 0, "slides_checked": 0})
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
-        if _has_pictures(slides):
-            _with_aspects(slides, _read_aspects(indices))
+        if _has_pictures(slides) or _has_charts(slides):
+            _with_package(slides, _read_package(indices, charts=_has_charts(slides)))
         findings = []
         for slide in slides:
             findings += slide_findings(slide, slide_w, slide_h)
@@ -4209,8 +4275,9 @@ def _issues_for(slide_index, shapes, aspects=None):
     known = dict(aspects or {})
     unknown = {n for n in names if n not in known}
     if _has_pictures(slides, unknown):
-        known = {**_read_aspects([slide_index]).get(slide_index, {}), **known}
-    _with_aspects(slides, {slide_index: known})
+        read = _read_package([slide_index]).get("pictures") or {}
+        known = {**read.get(slide_index, {}), **known}
+    _with_package(slides, {"pictures": {slide_index: known}})
     return slide_findings(slides[0], facts["slide_width"], facts["slide_height"],
                           only=names)
 
