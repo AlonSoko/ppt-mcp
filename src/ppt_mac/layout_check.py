@@ -647,3 +647,76 @@ def _saved_groups(slide_index, cache):
     except Exception:
         logger.debug("Cannot read the groups from %s", path, exc_info=True)
         return []
+
+
+def _photo_samples_impl(slide_index, names):
+    """The macOS half of ppt_com.layout_check._photo_samples_impl.
+
+    ``save as picture`` writes a picture's own image file, whatever format it
+    is asked for, and only inside PowerPoint's container. Quartz reads any of
+    them, turned the way PowerPoint shows it. Being the whole image, it lines
+    up with what is drawn only when the picture is not cropped, so a cropped
+    one is left unjudged.
+    """
+    import os
+
+    from ppt_mac.export import _staging_path
+
+    slide = _slide(ppt._get_pres_impl(), slide_index)
+    by_name = {}
+    for ref in shapes_of(slide):
+        try:
+            by_name[ref.name()] = ref
+        except Exception:
+            continue
+    found = {}
+    for name in names:
+        shape = by_name.get(name)
+        if shape is None:
+            continue
+        crop = _record(shape.picture_format)
+        if any(abs(_value(crop.get(side)) or 0) > 0.5
+               for side in (k.crop_left, k.crop_right, k.crop_top, k.crop_bottom)):
+            continue
+        staged = _staging_path(".img")
+        try:
+            shape.save_as_picture(picture_type=k.save_as_PNG_file, file_name=staged)
+            with open(staged, "rb") as image:
+                sampled = _sample_image(image.read(), shape.width() / max(shape.height(), 1))
+            if sampled:
+                found[name] = sampled
+        except Exception:
+            logger.debug("Cannot export '%s'", name, exc_info=True)
+        finally:
+            if os.path.exists(staged):
+                os.remove(staged)
+    return found
+
+
+def _sample_image(data, aspect, columns=96):
+    """A grid of an image file's colours, as utils.bitmap.sample_bmp gives it,
+    drawn at the proportions the picture is shown at."""
+    import Quartz
+    from Foundation import NSData
+
+    source = Quartz.CGImageSourceCreateWithData(NSData.dataWithBytes_length_(data, len(data)), None)
+    if source is None:
+        return None
+    image = Quartz.CGImageSourceCreateThumbnailAtIndex(source, 0, {
+        Quartz.kCGImageSourceCreateThumbnailFromImageAlways: True,
+        Quartz.kCGImageSourceCreateThumbnailWithTransform: True,
+        Quartz.kCGImageSourceThumbnailMaxPixelSize: 1024,
+    })
+    if image is None:
+        return None
+    rows = max(1, round(columns / max(aspect, 0.01)))
+    space = Quartz.CGColorSpaceCreateWithName(Quartz.kCGColorSpaceSRGB)
+    context = Quartz.CGBitmapContextCreate(None, columns, rows, 8, columns * 4, space,
+                                           Quartz.kCGImageAlphaPremultipliedLast)
+    Quartz.CGContextSetInterpolationQuality(context, Quartz.kCGInterpolationNone)
+    Quartz.CGContextDrawImage(context, Quartz.CGRectMake(0, 0, columns, rows), image)
+    pixels = Quartz.CGBitmapContextGetData(context)
+    raw = bytes(pixels.as_buffer(columns * rows * 4))
+    colours = [f"#{raw[i]:02X}{raw[i + 1]:02X}{raw[i + 2]:02X}"
+               for i in range(0, len(raw), 4)]
+    return {"columns": columns, "rows": rows, "colours": colours}

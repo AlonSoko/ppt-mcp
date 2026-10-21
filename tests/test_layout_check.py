@@ -3323,3 +3323,57 @@ def test_the_text_inside_a_group_is_read_from_the_file(tmp_path):
     text = inner["text"]
     assert text["content"] == "1516 עד 1917" and text["directions"] == ["rtl"]
     assert text["runs"][0]["font"] == "David" and text["script_font"] == "Arial"
+
+
+# ---------------------------------------------------------------------------
+# Text on a photo
+# ---------------------------------------------------------------------------
+from utils.bitmap import sample_bmp  # noqa: E402
+
+
+def bmp(width, height, pixel):
+    """A 24-bit BMP whose pixel (x, y), from the top, is pixel(x, y)."""
+    stride = (width * 3 + 3) & ~3
+    rows = b""
+    for y in range(height - 1, -1, -1):
+        row = b"".join(bytes(reversed(pixel(x, y))) for x in range(width))
+        rows += row + b"\x00" * (stride - len(row))
+    header = struct.pack("<2sIHHI", b"BM", 54 + len(rows), 0, 0, 54)
+    info = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, len(rows), 2835, 2835, 0, 0)
+    return header + info + rows
+
+
+class TestTextOnAPhoto:
+    def photo_slide(self, top_half, bottom_half, text_colour="#FFFFFF", text_top=110):
+        photo = picture("Photo", 0, 0, 960, 540)
+        photo["photo"] = sample_bmp(bmp(96, 54, lambda x, y: top_half if y < 27 else bottom_half))
+        words = textbox("Caption", 100, text_top, 400, 60, z=2, runs=[
+            {"color_hex": text_colour, "size": 28.0, "bold": True}])
+        return slide(photo, words)
+
+    def test_the_sampler_reads_rows_from_the_top(self):
+        grid = sample_bmp(bmp(4, 2, lambda x, y: (255, 0, 0) if y == 0 else (0, 0, 255)), columns=4)
+        assert grid["colours"][:4] == ["#FF0000"] * 4 and grid["colours"][4:] == ["#0000FF"] * 4
+
+    def test_white_text_on_the_sky_is_reported_with_a_colour_that_reads(self):
+        [finding] = slide_findings(self.photo_slide((200, 220, 240), (40, 40, 40)), W, H)
+        assert finding["type"] == "low_contrast" and finding["on_photo"]
+        assert finding["shapes"] == ["Caption", "Photo"]
+        assert finding["fix"].startswith("Make the text #000000")
+
+    def test_white_text_on_the_dark_ground_reads(self):
+        page = self.photo_slide((200, 220, 240), (40, 40, 40), text_top=380)
+        assert slide_findings(page, W, H) == []
+
+    def test_text_across_light_and_dark_gets_a_card_behind_it(self):
+        page = self.photo_slide((250, 250, 250), (10, 10, 10), text_top=240)
+        page["shapes"][1]["height"] = 120
+        page["shapes"][1]["text"]["height"] = 100
+        [finding] = slide_findings(page, W, H)
+        assert "ppt_add_shape shape_type='rectangle'" in finding["fix"]
+        assert "zorder='behind_text'" in finding["fix"]
+
+    def test_a_photo_never_sampled_is_not_judged(self):
+        page = self.photo_slide((200, 220, 240), (40, 40, 40))
+        del page["shapes"][0]["photo"]
+        assert slide_findings(page, W, H) == []

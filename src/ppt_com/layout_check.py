@@ -1827,6 +1827,11 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
             continue
         backdrop, painted_by, painter = _backdrop(shape, shapes, background_hex, template,
                                                   background_gradient, slide_box)
+        if backdrop is None and painter is not None and painter.get("photo"):
+            found = _photo_contrast(slide_index, shape, painter, theme_colors)
+            if found is not None:
+                findings.append(found)
+            continue
         if not backdrop or (trust and _as_designed(shape, painted_by, follows_background)):
             continue
         if isinstance(backdrop, dict):
@@ -1895,6 +1900,89 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
             contrast=round(ratio, 2), minimum=needed,
         ))
     return findings
+
+
+# Text on a photo is hard to read when this share of what is behind it, or
+# more, falls short of the contrast its size needs. A colour that reads on all
+# but this share of it is good enough to suggest.
+_PHOTO_SHORT = 0.2
+_PHOTO_GOOD = 0.05
+
+
+def _photo_contrast(slide_index, shape, picture, theme_colors=None):
+    """Text drawn on a photo, judged against the photo's own pixels under it.
+
+    A photo is light in one place and dark in another, so no one colour
+    stands for it: the text is held to every sampled pixel behind it, and
+    reported when a fifth of them or more fall short.
+    """
+    from ppt_com.themes import _contrast_ratio
+
+    words = text_box(shape)
+    photo = picture["photo"]
+    box = shape_box(picture)
+    if words is None or _width(box) <= 0 or _height(box) <= 0:
+        return None
+    columns, rows = photo["columns"], photo["rows"]
+    behind = []
+    for r in range(rows):
+        y = box[1] + (r + 0.5) * _height(box) / rows
+        if not words[1] <= y <= words[3]:
+            continue
+        for c in range(columns):
+            x = box[0] + (c + 0.5) * _width(box) / columns
+            if words[0] <= x <= words[2]:
+                behind.append(photo["colours"][r * columns + c])
+    if len(behind) < 4:
+        return None
+    worst = None
+    for run in (shape.get("text") or {}).get("runs") or []:
+        colour = run.get("color_hex")
+        if not colour:
+            continue
+        size = run.get("size") or 0.0
+        large = size >= _LARGE_TEXT or (run.get("bold") and size >= _LARGE_BOLD_TEXT)
+        needed = _CONTRAST_LARGE if large else _CONTRAST_TEXT
+        ratios = sorted(_contrast_ratio(colour, b) for b in behind)
+        short = sum(1 for r in ratios if r < needed) / len(ratios)
+        if short >= _PHOTO_SHORT and (worst is None or short > worst[0]):
+            worst = (short, ratios[0], needed, colour)
+    if worst is None:
+        return None
+    short, least, needed, colour = worst
+    name = shape["name"]
+
+    def fails(candidate):
+        return sum(1 for b in behind if _contrast_ratio(candidate, b) < needed) / len(behind)
+
+    candidates = [c for key in ("dark1", "light1") if (c := (theme_colors or {}).get(key))]
+    candidates += ["#000000", "#FFFFFF"]
+    best = min(dict.fromkeys(candidates), key=fails)
+    if fails(best) <= _PHOTO_GOOD:
+        fix = (f"Make the text {best} (ppt_format_text color='{best}'), which reads on "
+               f"{round(100 * (1 - fails(best)))}% of the photo behind it")
+    else:
+        light = sum(_luminance(b) for b in behind) / len(behind) > 0.5
+        scrim = "#FFFFFF" if light else "#000000"
+        pad = 8.0
+        fix = (f"Put a see-through card behind the text: ppt_add_shape shape_type='rectangle' "
+               f"left={_num(words[0] - pad)} top={_num(words[1] - pad)} "
+               f"width={_num(_width(words) + 2 * pad)} height={_num(_height(words) + 2 * pad)} "
+               f"fill_color='{scrim}' fill_transparency=0.35 line_visible=false "
+               f"zorder='behind_text', and make the text {'#000000' if light else '#FFFFFF'}")
+    return _finding(
+        slide_index, "low_contrast", [name, picture["name"]],
+        f"Text in '{name}' is {colour} on the photo '{picture['name']}': "
+        f"{round(100 * short)}% of the photo behind it falls short of {needed:g}:1 "
+        f"against it, as little as {least:.1f}:1.",
+        f"{fix}. Or move the text to a calmer part of the photo.",
+        contrast_ratio=round(least, 2), required_ratio=needed, on_photo=True,
+    )
+
+
+def _luminance(colour):
+    red, green, blue = (int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
 
 def _theme_text_colours(theme_colors, ratio, needed):
@@ -4817,6 +4905,70 @@ def _read_fonts():
         return None
 
 
+# The most pixels across a picture is exported at to judge text on it.
+_PHOTO_PIXELS = 480
+
+
+def _photo_samples_impl(slide_index, names):
+    """The colours of each named picture, sampled from an export of it alone.
+
+    The picture is written as a BMP the size it is drawn, at most
+    _PHOTO_PIXELS across, without the text over it: the text's own pixels
+    would otherwise count as its background. Exporting a shape changes
+    nothing on the slide.
+    """
+    from ppt_com.constants import ppShapeFormatBMP
+    from utils.bitmap import sample_bmp
+
+    slide = ppt._get_pres_impl().Slides(slide_index)
+    found = {}
+    for name in names:
+        handle, path = tempfile.mkstemp(suffix=".bmp")
+        os.close(handle)
+        try:
+            shape = slide.Shapes(name)
+            scale = min(1.0, _PHOTO_PIXELS / max(shape.Width, 1))
+            shape.Export(path, ppShapeFormatBMP, round(shape.Width * scale),
+                         round(shape.Height * scale))
+            with open(path, "rb") as image:
+                sampled = sample_bmp(image.read())
+            if sampled:
+                found[name] = sampled
+        except Exception:
+            logger.debug("Cannot export '%s'", name, exc_info=True)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+    return found
+
+
+def _with_photos(slides):
+    """Give each picture that has text drawn on it the colours it has.
+
+    Only for a whole check: exporting a picture is the slowest read there is.
+    """
+    for slide in slides:
+        shapes = slide["shapes"]
+        wanted = set()
+        for shape in shapes:
+            if not (shape.get("text") or {}).get("chars"):
+                continue
+            _, source, painter = _backdrop(shape, shapes, slide.get("background_hex"))
+            if (source == "shape" and painter is not None and painter.get("type") in _PICTURES
+                    and not _turned(painter)):
+                wanted.add(painter["name"])
+        if not wanted:
+            continue
+        try:
+            found = ppt.execute(_photo_samples_impl, slide["slide_index"], sorted(wanted))
+        except Exception:
+            logger.debug("Cannot sample the pictures", exc_info=True)
+            continue
+        for shape in shapes:
+            if shape["name"] in found:
+                shape["photo"] = found[shape["name"]]
+
+
 def _has_pictures(slides, names=None):
     return any(s.get("type") in _PICTURES and (names is None or s["name"] in names)
                for slide in slides for s in slide["shapes"])
@@ -4875,6 +5027,7 @@ def check_layout(params: CheckLayoutInput) -> str:
         if _has_pictures(slides) or _has_charts(slides):
             _with_package(slides, _read_package(indices, charts=_has_charts(slides)))
         _with_fonts(slides, _read_fonts)
+        _with_photos(slides)
         findings = []
         for slide in slides:
             findings += slide_findings(slide, slide_w, slide_h)
