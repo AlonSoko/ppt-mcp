@@ -3197,3 +3197,70 @@ class TestTemplateRules:
         slant = graphic("Slant", 600, 0, 200, 540, source="layout")
         slant["type"] = 9   # msoLine
         assert [f for f in check_on([slant], self.title(2)) if f["type"] == "overlap"] == []
+
+
+class TestATitleOffItsLayout:
+    def page(self, index, layout, left=40.0, width=880.0, home=(40.0, 30.0, 880.0, 60.0)):
+        title = textbox("Title 1", left, 30, width, 60)
+        title["placeholder_type"] = 1
+        title["type"] = msoPlaceholder
+        page = slide(title, index=index, layout=layout)
+        page["layout_title"] = list(home)
+        return page
+
+    def test_a_title_nudged_on_a_layout_used_once_is_reported(self):
+        slides = [self.page(2, "Title and Content"), self.page(3, "Title and Content"),
+                  self.page(4, "Quote", left=44.0, width=876.0)]
+        [finding] = layout_check._titles_off_their_layout(slides)
+        assert finding["slides"] == [4]
+        assert "left 44 pt where the layout has 40 pt" in finding["message"]
+        assert finding["fix"] == ("Put it back (ppt_update_shape shape_name='Title 1' left=40 "
+                                  "top=30 width=880 height=60).")
+
+    def test_a_layout_used_twice_is_left_to_the_titles_comparison(self):
+        slides = [self.page(2, "Quote", left=44.0), self.page(3, "Quote")]
+        assert layout_check._titles_off_their_layout(slides) == []
+
+    def test_a_title_moved_far_is_a_decision(self):
+        slides = [self.page(4, "Cover", left=200.0)]
+        assert layout_check._titles_off_their_layout(slides) == []
+
+
+def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
+    from utils.package import layout_facts
+
+    ns = ('xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+          'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"')
+    layout = (f'<p:sldLayout {ns} showMasterSp="0"><p:cSld><p:spTree>'
+              '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>'
+              '<p:spPr><a:xfrm><a:off x="508000" y="381000"/><a:ext cx="11176000" cy="762000"/></a:xfrm></p:spPr></p:sp>'
+              '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Rule"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+              '<p:spPr><a:xfrm><a:off x="508000" y="1270000"/><a:ext cx="11176000" cy="19050"/></a:xfrm>'
+              '<a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr></p:sp>'
+              '</p:spTree></p:cSld></p:sldLayout>')
+    master = (f'<p:sldMaster {ns}><p:cSld><p:spTree/></p:cSld>'
+              '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"/></p:sldMaster>')
+    theme = ('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>'
+             '<a:clrScheme name="x"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>'
+             '<a:accent1><a:srgbClr val="C0504D"/></a:accent1></a:clrScheme></a:themeElements></a:theme>')
+    path = deck_file(tmp_path, [], {})
+    entries = {n: zipfile.ZipFile(path).read(n) for n in zipfile.ZipFile(path).namelist()}
+    entries["ppt/slides/_rels/slide1.xml.rels"] = RELS.format(
+        '<Relationship Id="rId1" Target="../slideLayouts/slideLayout1.xml" Type="slideLayout"/>').encode()
+    entries["ppt/slideLayouts/slideLayout1.xml"] = layout.encode()
+    entries["ppt/slideLayouts/_rels/slideLayout1.xml.rels"] = RELS.format(
+        '<Relationship Id="rId1" Target="../slideMasters/slideMaster1.xml" Type="slideMaster"/>').encode()
+    entries["ppt/slideMasters/slideMaster1.xml"] = master.encode()
+    entries["ppt/slideMasters/_rels/slideMaster1.xml.rels"] = RELS.format(
+        '<Relationship Id="rId1" Target="../theme/theme1.xml" Type="theme"/>').encode()
+    entries["ppt/theme/theme1.xml"] = theme.encode()
+    with zipfile.ZipFile(path, "w") as archive:
+        for n, data in entries.items():
+            archive.writestr(n, data)
+    found = layout_facts(path, [1])[1]
+    assert found["title"] == [40.0, 30.0, 880.0, 60.0]
+    assert found["shows_master"] is False
+    [rule] = found["graphics"]
+    assert (rule["name"], rule["top"], rule["height"]) == ("Rule", 100.0, 1.5)
+    assert rule["fill"]["color_hex"] == "#C0504D"

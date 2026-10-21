@@ -202,3 +202,162 @@ def package_facts(path, slide_indices):
 def picture_aspects(path, slide_indices):
     """Each picture's own proportions: ``package_facts``'s pictures."""
     return package_facts(path, slide_indices)["pictures"]
+
+
+# ---------------------------------------------------------------------------
+# Layouts
+# ---------------------------------------------------------------------------
+_EMU = 12700
+_SCHEME = ("dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4",
+           "accent5", "accent6", "hlink", "folHlink")
+_TITLES = ("title", "ctrTitle")
+
+# The shape types the layout checks know, as PowerPoint numbers them.
+_AUTOSHAPE, _GROUP, _LINE, _PICTURE = 1, 6, 9, 13
+
+
+def _related(_, archive, part, folder):
+    """The part a part's relationships point to in ``folder``, or None."""
+    for target in _rels(archive, part).values():
+        if f"/{folder}/" in target:
+            return target
+    return None
+
+
+def _scheme(archive, master):
+    """The master's theme colours by the names shapes use: tx1, bg1, accent1."""
+    theme = _related(None, archive, master, "theme")
+    colours = {}
+    if theme and theme in archive.namelist():
+        root = ElementTree.fromstring(archive.read(theme))
+        scheme = root.find(".//a:clrScheme", _NS)
+        for name in _SCHEME:
+            entry = scheme.find(f"a:{name}", _NS) if scheme is not None else None
+            if entry is None:
+                continue
+            rgb = entry.find("a:srgbClr", _NS)
+            system = entry.find("a:sysClr", _NS)
+            value = rgb.get("val") if rgb is not None else (
+                system.get("lastClr") if system is not None else None)
+            if value:
+                colours[name] = "#" + value.upper()
+    mapping = {"bg1": "lt1", "tx1": "dk1", "bg2": "lt2", "tx2": "dk2"}
+    root = ElementTree.fromstring(archive.read(master))
+    clr_map = root.find("p:clrMap", _NS)
+    if clr_map is not None:
+        mapping.update({key: clr_map.get(key) for key in mapping if clr_map.get(key)})
+    for alias, name in mapping.items():
+        if name in colours:
+            colours[alias] = colours[name]
+    return colours
+
+
+def _colour(element, scheme):
+    """The colour a fill element names, or None when it is changed by tints
+    or shades, which are not worked out here."""
+    for kind in ("a:srgbClr", "a:schemeClr"):
+        found = element.find(kind, _NS)
+        if found is None:
+            continue
+        if len(found):
+            return None
+        if kind == "a:srgbClr":
+            return "#" + found.get("val", "").upper()
+        return scheme.get(found.get("val"))
+    return None
+
+
+def _fill(props, style, scheme):
+    """The fill facts the layout checks read, from a shape's properties."""
+    facts = {"visible": False, "solid": True, "color_hex": None, "transparency": 0.0}
+    if props is None:
+        return facts
+    if props.find("a:noFill", _NS) is not None:
+        return facts
+    solid = props.find("a:solidFill", _NS)
+    if solid is not None:
+        facts.update(visible=True, color_hex=_colour(solid, scheme))
+        return facts
+    if props.find("a:gradFill", _NS) is not None or props.find("a:blipFill", _NS) is not None:
+        facts.update(visible=True, solid=False)
+        return facts
+    ref = style.find("a:fillRef", _NS) if style is not None else None
+    if ref is not None and ref.get("idx", "0") != "0":
+        facts.update(visible=True, color_hex=_colour(ref, scheme))
+    return facts
+
+
+def _box(props):
+    xfrm = props.find("a:xfrm", _NS) if props is not None else None
+    if xfrm is None:
+        return None
+    off, ext = xfrm.find("a:off", _NS), xfrm.find("a:ext", _NS)
+    if off is None or ext is None:
+        return None
+    return ([round(int(off.get(k)) / _EMU, 2) for k in ("x", "y")]
+            + [round(int(ext.get(k)) / _EMU, 2) for k in ("cx", "cy")],
+            round(int(xfrm.get("rot", "0")) / 60000, 2))
+
+
+def _layout_shapes(root, scheme):
+    """The graphics and the title box a layout or a master draws."""
+    graphics, title = [], None
+    tree = root.find("p:cSld/p:spTree", _NS)
+    for element in list(tree) if tree is not None else []:
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag not in ("sp", "pic", "cxnSp", "grpSp"):
+            continue
+        nv = next((child for child in element if child.tag.endswith("Pr")
+                   and child.tag.rsplit("}", 1)[-1].startswith("nv")), None)
+        props_name = {"sp": "p:spPr", "pic": "p:spPr", "cxnSp": "p:spPr", "grpSp": "p:grpSpPr"}[tag]
+        props = element.find(props_name, _NS)
+        name = nv.find("p:cNvPr", _NS).get("name") if nv is not None else ""
+        placeholder = nv.find("p:nvPr/p:ph", _NS) if nv is not None else None
+        placed = _box(props)
+        if placeholder is not None:
+            if placeholder.get("type", "body") in _TITLES and placed:
+                title = placed[0]
+            continue
+        if not placed:
+            continue
+        (left, top, width, height), rotation = placed
+        geometry = props.find("a:prstGeom", _NS) if props is not None else None
+        line = tag == "cxnSp" or (geometry is not None and geometry.get("prst") == "line")
+        kind = {"pic": _PICTURE, "grpSp": _GROUP}.get(tag, _LINE if line else _AUTOSHAPE)
+        outline = props.find("a:ln", _NS) if props is not None else None
+        graphics.append({
+            "name": name, "type": kind, "left": left, "top": top, "width": width,
+            "height": height, "rotation": rotation, "visible": True, "connector": tag == "cxnSp",
+            "placeholder_type": None,
+            "fill": None if kind in (_GROUP, _LINE) else _fill(props, element.find("p:style", _NS), scheme),
+            "line_visible": None if outline is None else outline.find("a:noFill", _NS) is None,
+            "text": None,
+        })
+    return graphics, title
+
+
+def layout_facts(path, slide_indices):
+    """What each slide's layout draws and where it puts the title.
+
+    ``{slide_index: {"graphics": [...], "title": [left, top, width, height],
+    "shows_master": bool}}``, the graphics in the shape the layout checks
+    read and the title as the layout places it, or as its master does when
+    the layout leaves it where the master put it.
+    """
+    found = {}
+    with zipfile.ZipFile(path) as archive:
+        for index, _, parts in _slides(archive, slide_indices):
+            layout = next((p for p in parts.values() if "/slideLayouts/" in p), None)
+            if not layout or layout not in archive.namelist():
+                continue
+            master = _related(None, archive, layout, "slideMasters")
+            if not master or master not in archive.namelist():
+                continue
+            scheme = _scheme(archive, master)
+            root = ElementTree.fromstring(archive.read(layout))
+            graphics, title = _layout_shapes(root, scheme)
+            if title is None:
+                _, title = _layout_shapes(ElementTree.fromstring(archive.read(master)), scheme)
+            found[index] = {"graphics": graphics, "title": title,
+                            "shows_master": root.get("showMasterSp", "1") not in ("0", "false")}
+    return found

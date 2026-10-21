@@ -3710,7 +3710,59 @@ def _title_findings(slides, slide_h, slide_w=None):
 
 def deck_findings(slides, slide_h, slide_w=None):
     """What differs between slides that should not: titles and body text."""
-    return _title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
+    return (_title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
+            + _titles_off_their_layout(slides))
+
+
+# A title placeholder this far from where its layout puts it, and no further,
+# was nudged or resized by hand: further is a decision, a cover title moved
+# up for a photo.
+_LAYOUT_SLIP = 12.0
+
+
+def _titles_off_their_layout(slides):
+    """A title placeholder a little off where its layout puts it, on a layout
+    no other slide uses.
+
+    The titles of slides on one layout are compared with each other. One on
+    a layout used once has nothing to be compared with but the layout, and a
+    title dragged a few points or resized by hand shows as a jump when the
+    deck is flipped through.
+    """
+    uses = {}
+    for slide in slides:
+        uses[(slide.get("design"), slide.get("layout"))] = uses.get(
+            (slide.get("design"), slide.get("layout")), 0) + 1
+    findings = []
+    for slide in slides:
+        home = slide.get("layout_title")
+        if not home or uses[(slide.get("design"), slide.get("layout"))] != 1:
+            continue
+        title = next((s for s in slide["shapes"]
+                      if s.get("placeholder_type") in _TITLE_PLACEHOLDERS
+                      and s.get("visible", True)), None)
+        if title is None:
+            continue
+        now = [title["left"], title["top"], title["width"], title["height"]]
+        off = [abs(a - b) for a, b in zip(now, home, strict=True)]
+        if max(off) <= _ALIGNED or max(off) > _LAYOUT_SLIP:
+            continue
+        name = title["name"]
+        words = []
+        for field, a, b in zip(("left", "top", "width", "height"), now, home, strict=True):
+            if abs(a - b) > _ALIGNED:
+                words.append(f"{field} {_pt(a)} where the layout has {_pt(b)}")
+        index = slide["slide_index"]
+        findings.append(_finding(
+            index, "inconsistent_titles", [name],
+            f"The title on slide {index} is not where its layout '{slide.get('layout')}' "
+            f"puts it: {'; '.join(words)}. No other slide is on that layout, so "
+            "nothing else shows it, but it jumps when the deck is flipped through.",
+            f"Put it back (ppt_update_shape shape_name='{name}' left={_num(home[0])} "
+            f"top={_num(home[1])} width={_num(home[2])} height={_num(home[3])}).",
+            severity="warning", slides=[index],
+        ))
+    return findings
 
 
 # A text box is a slide's copy, rather than a label, a card's words or a
@@ -4481,6 +4533,38 @@ def _template_area(slide, graphics, cache=None):
     return area
 
 
+def _layout_title(slide, cache=None):
+    """Where the slide's layout puts its title, as a box, or None."""
+    key = None
+    if cache is not None:
+        try:
+            key = ("layout title", slide.Design.Index, slide.CustomLayout.Index)
+        except Exception:
+            key = None
+        if key in cache:
+            return cache[key]
+    box = None
+    try:
+        shapes = slide.CustomLayout.Shapes
+        for i in range(1, shapes.Count + 1):
+            shape = shapes(i)
+            if shape.Type != msoPlaceholder:
+                continue
+            try:
+                if shape.PlaceholderFormat.Type not in _TITLE_PLACEHOLDERS:
+                    continue
+            except Exception:
+                continue
+            box = [round(shape.Left, 2), round(shape.Top, 2),
+                   round(shape.Width, 2), round(shape.Height, 2)]
+            break
+    except Exception:
+        logger.debug("Cannot read the layout's title", exc_info=True)
+    if key is not None:
+        cache[key] = box
+    return box
+
+
 def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     """Read the slides into the plain dicts the checks work on.
 
@@ -4538,6 +4622,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "follows_background": follows,
             "template": template,
             "template_area": _template_area(slide, template, template_cache),
+            "layout_title": _layout_title(slide, template_cache) if detail is None else None,
             "shapes": shapes,
         })
     return facts

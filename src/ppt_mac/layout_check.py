@@ -481,6 +481,13 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         template, area = _template_facts(
             slide, None if shows is None else bool(shows), template_cache,
             None if detail is None else [s for s in shapes if s["name"] in detail])
+        drawn = _saved_layout(pres, slide_index, template_cache) if detail is None else None
+        if drawn and shows is not False:
+            from ppt_com.layout_check import _TEMPLATE_Z
+
+            for graphic in drawn["graphics"]:
+                template.append({**graphic, "z": _TEMPLATE_Z + len(template),
+                                 "source": "layout"})
         background_hex, background_gradient = (
             _background(slide, True if follows is None else bool(follows))
             if needs_background(shapes, detail) else (None, None))
@@ -489,6 +496,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             themes[design] = _theme_colours(slide)
         facts["slides"].append({
             "slide_index": slide_index,
+            "layout_title": (drawn or {}).get("title"),
             "design": design,
             "layout": _layout_name(own.get(k.layout)),
             "background_hex": background_hex,
@@ -584,3 +592,34 @@ def _installed_fonts_impl():
             names |= names_in_folder(os.path.join(cloud, family))
     _FONTS["installed"] = frozenset(n.lower() for n in names if n)
     return _FONTS["installed"]
+
+
+def _saved_layout(pres, slide_index, cache):
+    """What the slide's layout draws, from the deck's own file.
+
+    PowerPoint for Mac answers no shapes for a custom layout, so a layout's
+    own graphics, a band or a rule a title or section layout draws, and
+    where it puts its title, are read from the saved file, while it holds
+    what is on screen. A deck never saved, or changed since, answers None.
+    """
+    from ppt_mac.presentation import _local_path
+    from utils.package import layout_facts
+
+    if "saved file" not in cache:
+        path = None
+        try:
+            if pres.saved():
+                path = _local_path(pres.full_name())
+        except Exception:
+            logger.debug("Cannot tell whether the deck is saved", exc_info=True)
+        if path and not path.lower().endswith((".pptx", ".pptm", ".potx", ".ppsx")):
+            path = None
+        cache["saved file"] = path
+    path = cache["saved file"]
+    if not path:
+        return None
+    try:
+        return layout_facts(path, [slide_index]).get(slide_index)
+    except Exception:
+        logger.debug("Cannot read the layouts from %s", path, exc_info=True)
+        return None
