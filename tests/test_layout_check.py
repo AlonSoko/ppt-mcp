@@ -2687,3 +2687,130 @@ class TestWhatCannotBeReadDoesNotFailTheSlide:
         assert layout_check._commonest(["B", "A", "B", "A"]) == "B"
         assert layout_check._commonest(["A", "B", "B", "A"]) == "A"
         assert layout_check._commonest([]) is None
+
+
+# ---------------------------------------------------------------------------
+# Stretched pictures
+# ---------------------------------------------------------------------------
+import struct  # noqa: E402
+import zipfile  # noqa: E402
+
+from utils.package import image_size, picture_aspects  # noqa: E402
+
+
+def png(width, height):
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00"
+
+
+def jpeg(width, height, orientation=None):
+    data = b"\xff\xd8"
+    if orientation is not None:
+        tiff = b"MM\x00\x2a" + struct.pack(">I", 8) + struct.pack(">H", 1) + struct.pack(
+            ">HHIHH", 0x0112, 3, 1, orientation, 0) + b"\x00\x00\x00\x00"
+        exif = b"Exif\x00\x00" + tiff
+        data += b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif
+    sof = b"\x08" + struct.pack(">HH", height, width) + b"\x03\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+    return data + b"\xff\xc0" + struct.pack(">H", len(sof) + 2) + sof + b"\xff\xd9"
+
+
+def picture(name, left, top, width, height, aspect=None, z=1):
+    facts = shape(name, left, top, width, height, z=z, type=msoPicture)
+    if aspect is not None:
+        facts["natural_aspect"] = aspect
+    return facts
+
+
+PRESENTATION = (
+    '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    '<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst></p:presentation>')
+RELS = ('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '{}</Relationships>')
+
+
+def pic_xml(name, embed, crop=""):
+    return (f'<p:pic><p:nvPicPr><p:cNvPr id="4" name="{name}"/></p:nvPicPr>'
+            f'<p:blipFill><a:blip r:embed="{embed}"/>{crop}<a:stretch/></p:blipFill></p:pic>')
+
+
+def deck_file(tmp_path, pics, media):
+    slide_xml = (
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<p:cSld><p:spTree>{"".join(pics)}</p:spTree></p:cSld></p:sld>')
+    path = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("ppt/presentation.xml", PRESENTATION)
+        archive.writestr("ppt/_rels/presentation.xml.rels", RELS.format(
+            '<Relationship Id="rId2" Target="slides/slide1.xml" Type="slide"/>'))
+        archive.writestr("ppt/slides/slide1.xml", slide_xml)
+        archive.writestr("ppt/slides/_rels/slide1.xml.rels", RELS.format("".join(
+            f'<Relationship Id="{rid}" Target="../media/{file}" Type="image"/>'
+            for rid, (file, _) in media.items())))
+        for file, data in media.values():
+            archive.writestr(f"ppt/media/{file}", data)
+    return path
+
+
+class TestImageSizes:
+    def test_png_and_jpeg_are_measured(self):
+        assert image_size(png(1600, 900)) == (1600, 900)
+        assert image_size(jpeg(1200, 800)) == (1200, 800)
+
+    def test_a_jpeg_marked_as_turned_is_not_guessed_at(self):
+        assert image_size(jpeg(1200, 800, orientation=6)) is None
+        assert image_size(jpeg(1200, 800, orientation=1)) == (1200, 800)
+
+    def test_something_else_is_unknown(self):
+        assert image_size(b"<svg/>") is None
+
+
+class TestPictureProportionsFromTheFile:
+    def test_a_picture_takes_its_images_proportions(self, tmp_path):
+        path = deck_file(tmp_path, [pic_xml("Photo", "rId1")], {"rId1": ("a.png", png(1600, 900))})
+        assert picture_aspects(path, [1]) == {1: {"Photo": pytest.approx(16 / 9)}}
+
+    def test_a_crop_is_taken_off_first(self, tmp_path):
+        crop = '<a:srcRect l="25000" r="25000"/>'
+        path = deck_file(tmp_path, [pic_xml("Photo", "rId1", crop)], {"rId1": ("a.png", png(1600, 900))})
+        assert picture_aspects(path, [1])[1]["Photo"] == pytest.approx(800 / 900)
+
+    def test_two_pictures_of_one_name_are_left_unknown(self, tmp_path):
+        path = deck_file(tmp_path, [pic_xml("Photo", "rId1"), pic_xml("Photo", "rId1")],
+                         {"rId1": ("a.png", png(1600, 900))})
+        assert picture_aspects(path, [1]) == {1: {}}
+
+
+class TestStretchedPictures:
+    def test_a_picture_stretched_sideways_is_narrowed_about_its_centre(self):
+        # A 4:3 photo given 400 by 200.
+        [finding] = check(picture("Photo", 100, 100, 400, 200, aspect=4 / 3))
+        assert finding["type"] == "stretched_picture"
+        assert finding["stretch_pct"] == 50
+        assert "ppt_update_shape width=266.67 left=166.67" in finding["fix"]
+
+    def test_a_picture_squeezed_is_made_shorter(self):
+        [finding] = check(picture("Logo", 100, 100, 200, 200, aspect=2.0))
+        assert "ppt_update_shape height=100 top=150" in finding["fix"]
+
+    def test_a_point_of_rounding_is_not(self):
+        assert check(picture("Photo", 100, 100, 400, 301, aspect=4 / 3)) == []
+
+    def test_a_picture_whose_image_is_unknown_is_not_judged(self):
+        assert check(picture("Photo", 100, 100, 400, 200)) == []
+
+    def test_a_new_picture_is_judged_by_what_the_write_saw(self, monkeypatch):
+        fake = FakeDeck([slide(picture("Picture 1", 100, 100, 400, 200))])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = report_layout({"success": True, "shape_name": "Picture 1",
+                                "_natural_aspect": 4 / 3}, 1, ["Picture 1"])
+        assert "_natural_aspect" not in result
+        assert [f["type"] for f in result["layout_issues"]] == ["stretched_picture"]
+
+
+def test_a_locked_stretched_picture_is_unlocked_first():
+    photo = picture("Photo", 100, 100, 400, 200, aspect=4 / 3)
+    photo["lock_aspect"] = True
+    [finding] = check(photo)
+    assert finding["fix"].startswith("Unlock its proportions first (ppt_lock_aspect_ratio locked=false), then make it")

@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 import unicodedata
 from itertools import pairwise
 from typing import Optional
@@ -35,6 +36,7 @@ from backend import ppt
 from utils.color import int_to_hex
 from utils.navigation import goto_slide
 from utils.offload import run_offloaded
+from utils.package import picture_aspects
 from ppt_com.constants import (
     msoChart, msoEmbeddedOLEObject, msoFillGradient, msoFillSolid, msoGroup, msoLine,
     msoLinkedOLEObject, msoLinkedPicture, msoMedia, msoPicture,
@@ -169,6 +171,10 @@ _TITLE_ELSEWHERE = 0.25
 # Wider than this, and it is a design: a wide card beside two narrow ones.
 _ALONG_SIZE_SLIP = 0.25
 
+# A picture drawn this much wider or narrower for its height than its image
+# is stretched. Less is rounding, or a crop a point off.
+_STRETCH = 0.03
+
 # How much of a shape's text the reader keeps, for the checks that read it.
 _CONTENT_KEPT = 500
 
@@ -206,12 +212,12 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
-    "text_direction",
+    "text_direction", "stretched_picture",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
-    "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
+    "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
     "number_order", "text_direction", "empty_placeholder", "sample_text", "inconsistent_titles",
 )
@@ -2899,6 +2905,60 @@ def _text_direction(slide_index, shapes):
     return findings
 
 
+_PICTURES = frozenset({msoPicture, msoLinkedPicture})
+
+
+def _stretched(slide_index, shapes):
+    """A picture drawn in other proportions than its image's.
+
+    A photo or a logo given both a width and a height that do not match it is
+    squeezed or stretched, and faces and lettering show it at once. The fix
+    keeps the side that was meant and fits the other to it, about the same
+    centre, so the picture stays where it was put.
+    """
+    findings = []
+    for shape in shapes:
+        natural = shape.get("natural_aspect")
+        if (not natural or shape.get("type") not in _PICTURES
+                or not shape.get("visible", True) or shape["height"] <= 0):
+            continue
+        drawn = shape["width"] / shape["height"]
+        ratio = drawn / natural
+        if abs(ratio - 1) <= _STRETCH:
+            continue
+        name = shape["name"]
+        if ratio > 1:
+            width = shape["height"] * natural
+            left = shape["left"] + (shape["width"] - width) / 2
+            how = "wider"
+            fix = (f"Make it {_pt(shape['width'] - width)} narrower to fit its image, "
+                   f"keeping its height and centre (ppt_update_shape width={_num(width)} "
+                   f"left={_num(left)})")
+        else:
+            height = shape["width"] / natural
+            top = shape["top"] + (shape["height"] - height) / 2
+            how = "taller"
+            fix = (f"Make it {_pt(shape['height'] - height)} shorter to fit its image, "
+                   f"keeping its width and centre (ppt_update_shape height={_num(height)} "
+                   f"top={_num(top)})")
+        if shape.get("lock_aspect"):
+            # A locked picture keeps whatever proportions it has, the wrong
+            # ones too: given a new width, its height follows.
+            fix = (f"Unlock its proportions first (ppt_lock_aspect_ratio "
+                   f"locked=false), then {fix[0].lower()}{fix[1:]}")
+        stretch = round(abs(ratio - 1) * 100) if ratio > 1 else round(abs(1 / ratio - 1) * 100)
+        findings.append(_finding(
+            slide_index, "stretched_picture", [name],
+            f"'{name}' is stretched: it is drawn {_pt(shape['width'])} by "
+            f"{_pt(shape['height'])}, {stretch}% {how} for its size than its "
+            f"image, so what is in it looks squeezed.",
+            f"{fix}, or crop the image to these proportions instead of "
+            "stretching it (ppt_crop_picture).",
+            stretch_pct=stretch,
+        ))
+    return findings
+
+
 def _empty_placeholders(slide_index, shapes):
     findings = []
     for shape in shapes:
@@ -2945,6 +3005,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _off_centre_labels(index, layout)
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
+        + _stretched(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
     )
@@ -3639,6 +3700,11 @@ def _geometry_facts(shape, z):
             facts["placeholder_type"] = shape.PlaceholderFormat.Type
         except Exception:
             pass
+    if facts["type"] in (msoPicture, msoLinkedPicture):
+        try:
+            facts["lock_aspect"] = shape.LockAspectRatio == msoTrue
+        except Exception:
+            pass
     return facts
 
 
@@ -3936,6 +4002,53 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     return facts
 
 
+def _picture_aspects_impl(slide_indices):
+    """Each picture's own proportions, from a copy of the deck saved aside.
+
+    ``SaveCopyAs`` leaves the open deck as it was: not marked as changed,
+    nothing to undo.
+    """
+    pres = ppt._get_pres_impl()
+    try:
+        suffix = os.path.splitext(pres.FullName)[1] or ".pptx"
+    except Exception:
+        suffix = ".pptx"
+    if suffix.lower() not in (".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"):
+        suffix = ".pptx"
+    handle, path = tempfile.mkstemp(suffix=suffix)
+    os.close(handle)
+    os.remove(path)
+    try:
+        pres.SaveCopyAs(path)
+        return picture_aspects(path, slide_indices)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def _has_pictures(slides, names=None):
+    return any(s.get("type") in _PICTURES and (names is None or s["name"] in names)
+               for slide in slides for s in slide["shapes"])
+
+
+def _with_aspects(slides, aspects):
+    """Give each picture the proportions of its image, where they are known."""
+    for slide in slides:
+        known = aspects.get(slide["slide_index"]) or {}
+        for shape in slide["shapes"]:
+            if shape.get("type") in _PICTURES and shape["name"] in known:
+                shape["natural_aspect"] = known[shape["name"]]
+
+
+def _read_aspects(indices):
+    """``_picture_aspects_impl`` for the slides, or nothing when it fails."""
+    try:
+        return ppt.execute(_picture_aspects_impl, indices) or {}
+    except Exception:
+        logger.debug("Cannot read the pictures' own proportions", exc_info=True)
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -3959,6 +4072,8 @@ def check_layout(params: CheckLayoutInput) -> str:
         if facts is None:  # a deck with no slides
             return json.dumps({"issues": [], "total": 0, "slides_checked": 0})
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
+        if _has_pictures(slides):
+            _with_aspects(slides, _read_aspects(indices))
         findings = []
         for slide in slides:
             findings += slide_findings(slide, slide_w, slide_h)
@@ -3974,11 +4089,12 @@ def check_layout(params: CheckLayoutInput) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _issues_for(slide_index, shapes):
+def _issues_for(slide_index, shapes, aspects=None):
     """The per-shape findings on one slide for the shapes a write touched.
 
     ``shapes`` are names, or 1-based positions for a tool that was given one;
     a position is turned into its name from a read of the slide's geometry.
+    ``aspects`` are pictures' own proportions the write already knows.
     """
     names = {s for s in shapes if isinstance(s, str) and s}
     positions = {s for s in shapes if isinstance(s, int) and not isinstance(s, bool)}
@@ -3988,7 +4104,13 @@ def _issues_for(slide_index, shapes):
     if not names:
         return []
     facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names), None)
-    return slide_findings(facts["slides"][0], facts["slide_width"], facts["slide_height"],
+    slides = facts["slides"]
+    known = dict(aspects or {})
+    unknown = {n for n in names if n not in known}
+    if _has_pictures(slides, unknown):
+        known = {**_read_aspects([slide_index]).get(slide_index, {}), **known}
+    _with_aspects(slides, {slide_index: known})
+    return slide_findings(slides[0], facts["slide_width"], facts["slide_height"],
                           only=names)
 
 
@@ -4014,12 +4136,14 @@ def report_layouts(result: dict, touched) -> dict:
     touched = {index: [s for s in shapes if s not in (None, "")]
                for index, shapes in (touched or {}).items()}
     touched = {index: shapes for index, shapes in touched.items() if shapes}
+    natural = result.pop("_natural_aspect", None) if isinstance(result, dict) else None
     if not touched or not isinstance(result, dict) or "error" in result:
         return result
+    aspects = {result["shape_name"]: natural} if natural and result.get("shape_name") else None
     issues = []
     try:
         for slide_index in sorted(touched):
-            issues += _issues_for(slide_index, touched[slide_index])
+            issues += _issues_for(slide_index, touched[slide_index], aspects)
     except Exception as e:  # noqa: BLE001 - the write itself already succeeded
         logger.debug("Layout check after a write failed", exc_info=True)
         result["layout_check_failed"] = str(e)

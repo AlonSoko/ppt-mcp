@@ -47,7 +47,9 @@ from backend.mac_enums import (
     PpParagraphAlignment,
     PpPlaceholderType,
 )
-from ppt_com.constants import msoFillGradient, msoFillSolid, msoGroup, msoPlaceholder
+from ppt_com.constants import (
+    msoFillGradient, msoFillSolid, msoGroup, msoLinkedPicture, msoPicture, msoPlaceholder,
+)
 from utils.color import rgb_list_to_hex
 from utils.navigation import goto_slide
 
@@ -306,6 +308,10 @@ def _geometry_facts(shape, record, z):
     if type_int == msoPlaceholder:
         facts["placeholder_type"] = _windows_constant(
             PpPlaceholderType, record.get(k.placeholder_type))
+    if type_int in (msoPicture, msoLinkedPicture):
+        locked = _value(record.get(k.lock_aspect_ratio))
+        if locked is not None:
+            facts["lock_aspect"] = bool(locked)
     # Kept for _read_appearance, which has no record; dropped before return.
     facts["_has_text_frame"] = bool(
         _from_record(record, k.has_text_frame, shape, "has_text_frame"))
@@ -492,3 +498,27 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "shapes": shapes,
         })
     return facts
+
+
+def _picture_aspects_impl(slide_indices):
+    """The macOS half of ppt_com.layout_check._picture_aspects_impl.
+
+    PowerPoint for Mac has no way to save a copy aside: saving to another
+    path moves the open deck to it. So the deck's own file is read, and only
+    while it holds what is on screen. A deck never saved, or changed since,
+    answers nothing, and its pictures go unjudged.
+    """
+    from ppt_com.layout_check import picture_aspects
+    from ppt_mac.presentation import _local_path
+
+    pres = ppt._get_pres_impl()
+    try:
+        if not pres.saved():
+            return {}
+        path = _local_path(pres.full_name())
+    except Exception:
+        logger.debug("Cannot tell whether the deck is saved", exc_info=True)
+        return {}
+    if not path or not path.lower().endswith((".pptx", ".pptm", ".potx", ".ppsx")):
+        return {}
+    return picture_aspects(path, slide_indices)
