@@ -3167,3 +3167,33 @@ class TestTopAndBottomMargins:
     def test_a_footnote_set_low_is_placed_there(self):
         shapes = titled_row() + [textbox("note", 40, H - 22, 400, 18, z=9, text_height=14)]
         assert [f for f in check(*shapes) if f["type"] == "narrow_margin"] == []
+
+
+class TestTemplateRules:
+    RULE = graphic("Title rule", 40, 100, 880, 1.5, source="layout")
+
+    def title(self, lines):
+        title = placed("Title 1", 40, 30, 880, 70, 47.2, 40, 600, 40 * lines)
+        title["placeholder_type"] = 1
+        title["type"] = msoPlaceholder
+        title["text"]["runs"] = [{"color_hex": "#0B2545", "size": 32.0, "bold": True}]
+        return title
+
+    def test_a_title_that_wrapped_across_the_rule_is_reported(self):
+        [found] = [f for f in check_on([self.RULE], self.title(2)) if f["type"] == "overlap"]
+        assert found["shapes"] == ["Title 1", "Title rule"]
+        assert "a line the template draws, drawn by the slide's layout" in found["message"]
+        assert found["fix"].startswith("Keep 'Title 1' to the room above the line")
+
+    def test_one_line_above_the_rule_is_not(self):
+        assert [f for f in check_on([self.RULE], self.title(1)) if f["type"] == "overlap"] == []
+
+    def test_a_card_set_over_the_rule_is_moved_below_it(self):
+        over = card("card", 40, 90, 300, 100, z=2)
+        [found] = [f for f in check_on([self.RULE], over) if f["type"] == "overlap"]
+        assert "Move 'card' down by 17.5 pt" in found["fix"]
+
+    def test_a_slanting_line_is_not_a_rule(self):
+        slant = graphic("Slant", 600, 0, 200, 540, source="layout")
+        slant["type"] = 9   # msoLine
+        assert [f for f in check_on([slant], self.title(2)) if f["type"] == "overlap"] == []

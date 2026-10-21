@@ -1353,6 +1353,85 @@ def _template_collisions(slide_index, shapes, template, layout, area=()):
     return findings
 
 
+# A template graphic this thin is a rule: a line under the title, a line over
+# the footer.
+_RULE = 3.0
+
+
+def _template_rules(slide_index, shapes, template, layout):
+    """Text, or a card, drawn across one of the template's rules.
+
+    A rule under the title is drawn on every slide; a title that wraps onto a
+    second line runs its words across it, and a card set over it cuts it. A
+    rule is too thin to share an area with anything, so it is judged by
+    whether it crosses what the shape draws. A placeholder's frame often
+    reaches over its layout's rule by design, so for one it is the words that
+    count, and only where they cross.
+    """
+    rules = []
+    for graphic in template or ():
+        if not graphic.get("visible", True) or _turned(graphic):
+            continue
+        box = shape_box(graphic)
+        # Thin one way: a slanting line's box says nothing about where it is.
+        thin = min(_width(box), _height(box))
+        if thin > _RULE or not (_is_line(graphic) or paints_box(graphic)):
+            continue
+        if max(_width(box), _height(box)) < 4 * _RULE:
+            continue
+        rules.append((graphic, box, _width(box) >= _height(box)))
+    if not rules:
+        return []
+    findings = []
+    for a in shapes:
+        if not a.get("visible", True) or _is_line(a) or _turned(a):
+            continue
+        if a.get("placeholder_type") is not None or not paints_box(a):
+            ink = text_box(a)
+        else:
+            ink = shape_box(a)
+        if ink is None:
+            continue
+        for graphic, box, across in rules:
+            if across:
+                line = (box[1] + box[3]) / 2
+                crosses = (ink[1] + _MIN_OVERLAP < line < ink[3] - _MIN_OVERLAP
+                           and _shared(ink, (box[0], ink[1], box[2], ink[3]))[0] > _MIN_OVERLAP)
+            else:
+                line = (box[0] + box[2]) / 2
+                crosses = (ink[0] + _MIN_OVERLAP < line < ink[2] - _MIN_OVERLAP
+                           and _shared(ink, (ink[0], box[1], ink[2], box[3]))[1] > _MIN_OVERLAP)
+            if not crosses:
+                continue
+            name = a["name"]
+            what = f"The text of '{name}'" if a.get("placeholder_type") is not None or not paints_box(a) \
+                else f"'{name}'"
+            source = _FROM.get(graphic.get("source"))
+            drawn = f", drawn by {source}" if source else ""
+            if across and (a.get("text") or {}).get("chars") and (ink[1] + ink[3]) / 2 < line:
+                # Words above the rule that grew down across it: a title that
+                # wrapped.
+                fix = (f"Keep '{name}' to the room above the line: shorten the words "
+                       f"or make the font smaller until they end above "
+                       f"{_pt(line - _MIN_OVERLAP)} (ppt_format_text font_size=...).")
+            elif across:
+                by = box[3] + _CLEARANCE - ink[1]
+                fix = (f"Move '{name}' down by {_pt(by)}, below the line "
+                       f"(ppt_update_shape dtop={_num(by)}), or make it shorter.")
+            else:
+                by = box[2] + _CLEARANCE - ink[0]
+                fix = (f"Move '{name}' right by {_pt(by)}, clear of the line "
+                       f"(ppt_update_shape dleft={_num(by)}), or make it narrower.")
+            findings.append(_finding(
+                slide_index, "overlap", [name, graphic["name"]],
+                f"{what} runs across '{graphic['name']}', a line the template draws"
+                f"{drawn}.",
+                fix, template_graphics=[graphic["name"]],
+            ))
+            break
+    return findings
+
+
 def _template_collision_finding(slide_index, a, a_ink, hits, shapes, graphics, layout,
                                 carved=False):
     a_name = a["name"]
@@ -3322,6 +3401,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _overflow(index, shapes, layout)
         + _overlap(index, shapes, layout)
         + _template_collisions(index, shapes, template, layout, slide.get("template_area"))
+        + _template_rules(index, shapes, template, layout)
         + _low_contrast(index, shapes, slide.get("background_hex"), template,
                         slide.get("follows_background"), layout, trust_template,
                         slide.get("background_gradient"), slide.get("theme_colors"))
