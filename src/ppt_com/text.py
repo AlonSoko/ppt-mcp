@@ -6,7 +6,7 @@ import os
 import re
 import time
 import unicodedata
-from typing import Annotated, List, Optional, Union
+from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import (
     BaseModel, ConfigDict, Field, StringConstraints,
@@ -24,6 +24,7 @@ from ppt_com.constants import (
     msoTrue, msoFalse, msoTriStateMixed,
     msoPlaceholder, msoGroup,
     ppAlignLeft, ppAlignCenter, ppAlignRight, ppAlignJustify, ppAlignDistribute,
+    ppDirectionLeftToRight, ppDirectionRightToLeft,
     ppAutoSizeNone, ppAutoSizeShapeToFitText, ppAutoSizeTextToFitShape,
     ppBulletNone, ppBulletUnnumbered, ppBulletNumbered,
     ppBulletAlphaLCPeriod, ppBulletAlphaUCPeriod,
@@ -51,6 +52,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Alignment / orientation / auto-size maps
 # ---------------------------------------------------------------------------
+DIRECTION_MAP = {
+    "ltr": ppDirectionLeftToRight,
+    "rtl": ppDirectionRightToLeft,
+}
+
 ALIGNMENT_MAP = {
     "left": ppAlignLeft,
     "center": ppAlignCenter,
@@ -475,6 +481,16 @@ class SetParagraphFormatInput(BaseModel):
     space_after: Optional[float] = Field(default=None, description="Space after paragraph in points")
     indent_level: Optional[int] = Field(default=None, ge=1, le=9, description="Indent level (1-9)")
     first_line_indent: Optional[float] = Field(default=None, description="First line indent in points")
+    direction: Optional[Literal["rtl", "ltr"]] = Field(
+        default=None,
+        description=(
+            "Reading direction: 'rtl' for Hebrew, Arabic and other right-to-left "
+            "text, 'ltr' otherwise. PowerPoint for Windows draws a paragraph "
+            "left to right unless it is set 'rtl', whatever its letters, so a "
+            "Hebrew line with a number or punctuation in it reads wrong there "
+            "until it is. Set it on every right-to-left paragraph."
+        ),
+    )
 
 
 class SetBulletInput(BaseModel):
@@ -1878,7 +1894,7 @@ def _format_text_range_impl(slide_index, shape_name_or_index, start, length,
 
 def _set_paragraph_format_impl(slide_index, shape_name_or_index, paragraph_index,
                                  alignment, line_spacing, space_before, space_after,
-                                 indent_level, first_line_indent) -> dict:
+                                 indent_level, first_line_indent, direction=None) -> dict:
     app = ppt._get_app_impl()
     goto_slide(app, slide_index)
     pres = ppt._get_pres_impl()
@@ -1896,6 +1912,20 @@ def _set_paragraph_format_impl(slide_index, shape_name_or_index, paragraph_index
         target = tr
 
     pf = target.ParagraphFormat
+
+    if direction is not None:
+        # PowerPoint mirrors a paragraph's alignment when its direction
+        # changes, so right-set Hebrew set right to left jumps to the left.
+        # What was drawn on the right stays there.
+        if paragraph_index is not None:
+            paragraphs = [target]
+        else:
+            paragraphs = [tr.Paragraphs(i) for i in range(1, tr.Paragraphs().Count + 1)]
+        kept = [p.ParagraphFormat.Alignment for p in paragraphs]
+        pf.TextDirection = DIRECTION_MAP[direction]
+        if alignment is None:
+            for paragraph, value in zip(paragraphs, kept):
+                paragraph.ParagraphFormat.Alignment = value
 
     if alignment is not None:
         align_val = ALIGNMENT_MAP.get(alignment)
@@ -2332,7 +2362,9 @@ def set_paragraph_format(params: SetParagraphFormatInput) -> str:
             params.slide_index, params.shape_name_or_index, params.paragraph_index,
             params.alignment, params.line_spacing, params.space_before,
             params.space_after, params.indent_level, params.first_line_indent,
+            params.direction,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -3016,7 +3048,8 @@ def register_tools(mcp):
         """Set paragraph-level formatting for a shape.
 
         Applies alignment, line spacing, space before/after, indent level,
-        and first-line indent. Omit paragraph_index to format all paragraphs.
+        first-line indent and reading direction. Omit paragraph_index to
+        format all paragraphs.
         """
         return await run_offloaded(set_paragraph_format, params)
 

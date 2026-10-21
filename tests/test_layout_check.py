@@ -756,8 +756,13 @@ class FakeRange:
             Color=SimpleNamespace(RGB=rgb, ObjectThemeColor=theme[0] if theme else 0),
             Size=size, Bold=bold, Name="Calibri Light" if size >= 30 else "Calibri"))
 
-    def Paragraphs(self, i):
-        return SimpleNamespace(ParagraphFormat=SimpleNamespace(Alignment=self._alignment))
+    def Paragraphs(self, i=None):
+        paragraphs = self.Text.split("\r")
+        if i is None:
+            return SimpleNamespace(Count=len(paragraphs))
+        direction = 2 if paragraphs[i - 1].startswith("\u05d0") else 1
+        return SimpleNamespace(ParagraphFormat=SimpleNamespace(
+            Alignment=self._alignment, TextDirection=direction))
 
 
 def fake_shape(name="TextBox 1", content="Hello there", runs=None, bounds=(107.2, 103.6, 150.0, 30.0)):
@@ -821,6 +826,14 @@ class TestTheWindowsReader:
     def test_the_shape_asked_about_is_read_in_full(self):
         words = layout_check._shape_facts(fake_shape(), 1, ["TextBox 1"])["text"]
         assert words["runs"] and words["margins"] == MARGINS
+
+    def test_paragraph_directions_are_read_for_hebrew_text(self):
+        content = "\u05d0 1\r\u05d1 2"
+        shape = fake_shape(content=content, runs=[(content, 0x222222, 20.0, msoFalse)])
+        assert layout_check._shape_facts(shape, 1, None)["text"]["directions"] == ["rtl", "ltr"]
+
+    def test_and_not_for_text_without_it(self):
+        assert "directions" not in layout_check._shape_facts(fake_shape(), 1, None)["text"]
 
     def test_alignment_is_read_only_when_powerpoint_will_not_place_the_text(self):
         assert layout_check._shape_facts(fake_shape(), 1, None)["text"]["alignment"] is None
@@ -1765,7 +1778,9 @@ def worded(name, top, content):
 
 class TestNumberOrder:
     """Found on the Hebrew history deck: "1516 – 1917" under a Hebrew heading
-    was drawn with 1516 on the left, so it read 1917 to 1516."""
+    was drawn with 1516 on the left, so it read 1917 to 1516. Live on both
+    platforms, a line of numbers only draws left to right even when its
+    paragraph is set right to left."""
 
     def test_a_range_of_numbers_on_a_hebrew_slide_is_reported(self):
         [finding] = check(worded("heading", 40, "השלטון העות'מאני"),
@@ -1775,6 +1790,13 @@ class TestNumberOrder:
         assert finding["line"] == "1516 – 1917"
         assert "1516 עד 1917" in finding["fix"]
         assert 'find_text="1516 – 1917"' in finding["fix"]
+        assert "ppt_set_paragraph_format direction='rtl'" in finding["fix"]
+
+    def test_a_line_already_set_right_to_left_needs_only_the_word(self):
+        years = worded("years", 100, "1516 – 1917")
+        years["text"]["directions"] = ["rtl"]
+        [finding] = check(worded("heading", 40, "השלטון העות'מאני"), years)
+        assert "direction" not in finding["fix"]
 
     def test_a_list_of_years_is_reported(self):
         [finding] = check(worded("heading", 40, "מלחמות"),
@@ -1789,6 +1811,7 @@ class TestNumberOrder:
     def test_one_line_of_a_shape_is_judged_on_its_own(self):
         [finding] = check(worded("card", 40, "השלטון העות'מאני\r1516 – 1917"))
         assert finding["line"] == "1516 – 1917"
+        assert "paragraph_index=2 direction='rtl'" in finding["fix"]
 
     @pytest.mark.parametrize("content", [
         "1516 עד 1917",        # a word sets the line right to left
@@ -1807,6 +1830,53 @@ class TestNumberOrder:
 
     def test_a_slide_of_numbers_alone_is_not_guessed_at(self):
         assert check(worded("years", 100, "1516 – 1917")) == []
+
+
+def directed(name, top, content, directions):
+    box = worded(name, top, content)
+    box["text"]["directions"] = directions
+    return box
+
+
+class TestTextDirection:
+    """Live on Windows, "1516 עד 1917" in a paragraph not set right to left
+    drew 1516 on the left; set right to left, it drew on the right. The Mac
+    drew both from the right."""
+
+    def test_a_hebrew_paragraph_with_a_number_left_to_right_is_reported(self):
+        [finding] = check(directed("years", 100, "1516 עד 1917", ["ltr"]))
+        assert finding["type"] == "text_direction"
+        assert finding["paragraphs"] == [1]
+        assert finding["fix"] == "Set them right to left (ppt_set_paragraph_format direction='rtl')."
+
+    def test_punctuation_is_enough(self):
+        [finding] = check(directed("t", 100, "שלום, עולם.", ["ltr"]))
+        assert finding["type"] == "text_direction"
+
+    def test_words_alone_draw_the_same_and_are_not(self):
+        assert check(directed("t", 100, "ציר הזמן", ["ltr"])) == []
+
+    def test_an_apostrophe_inside_a_word_draws_the_same_and_is_not(self):
+        # Live: the heading "השלטון העות'מאני" was reported until the check
+        # drew the line both ways instead of looking for punctuation.
+        assert check(directed("t", 100, "השלטון העות'מאני", ["ltr"])) == []
+
+    def test_a_number_after_the_words_is_reported(self):
+        # The Unicode algorithm draws "עד 1917" the same both ways; PowerPoint
+        # for Windows draws digits as Latin letters, and then it does not.
+        [finding] = check(directed("t", 100, "עד 1917", ["ltr"]))
+        assert finding["type"] == "text_direction"
+
+    def test_a_paragraph_set_right_to_left_is_not(self):
+        assert check(directed("t", 100, "1516 עד 1917", ["rtl"])) == []
+
+    def test_an_english_paragraph_beside_it_is_left_alone(self):
+        [finding] = check(directed("t", 100, "Ottoman rule\r1516 עד 1917", ["ltr", "ltr"]))
+        assert finding["paragraphs"] == [2]
+        assert "paragraph_index=2 direction='rtl'" in finding["fix"]
+
+    def test_a_direction_never_read_is_not_guessed(self):
+        assert check(worded("t", 100, "1516 עד 1917")) == []
 
 
 class TestWhatAWriteCannotSee:
@@ -2315,7 +2385,7 @@ import ast  # noqa: E402
 REPORTING = {
     "shapes.py": ["add_shape", "add_textbox", "add_picture", "update_shape", "duplicate_shape"],
     "text.py": ["set_text", "format_text", "format_text_range", "set_textframe",
-                "find_replace_text"],
+                "find_replace_text", "set_paragraph_format"],
     "advanced_ops.py": ["add_svg_icon", "add_picture_from_url", "replace_font",
                         "set_default_fonts"],
     "layout.py": ["align_shapes", "distribute_shapes", "set_slide_background", "set_slide_size"],

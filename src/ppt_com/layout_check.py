@@ -39,7 +39,7 @@ from ppt_com.constants import (
     msoChart, msoEmbeddedOLEObject, msoFillGradient, msoFillSolid, msoGroup, msoLine,
     msoLinkedOLEObject, msoLinkedPicture, msoMedia, msoPicture,
     msoPlaceholder, msoSmartArt, msoTable, msoTextBox, msoTrue,
-    ppAlignCenter, ppAlignRight,
+    ppAlignCenter, ppAlignRight, ppDirectionLeftToRight, ppDirectionRightToLeft,
     ppPlaceholderCenterTitle, ppPlaceholderDate, ppPlaceholderFooter,
     ppPlaceholderBody, ppPlaceholderHeader, ppPlaceholderObject,
     ppPlaceholderSlideNumber, ppPlaceholderTitle, ppPlaceholderVerticalTitle,
@@ -206,13 +206,14 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
+    "text_direction",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
-    "number_order", "empty_placeholder", "sample_text", "inconsistent_titles",
+    "number_order", "text_direction", "empty_placeholder", "sample_text", "inconsistent_titles",
 )
 
 
@@ -2671,27 +2672,45 @@ def _script(text):
     return script if rtl[script] > ltr else "Latin"
 
 
+def _paragraphs(content):
+    """A shape's paragraphs, in the order PowerPoint numbers them."""
+    return re.split(r"\r\n|[\r\n]", content)
+
+
+def _direction_call(paragraphs, indices):
+    """The ppt_set_paragraph_format call that sets these paragraphs right to left."""
+    if len(indices) == 1 and len([p for p in paragraphs if p.strip()]) > 1:
+        return f"ppt_set_paragraph_format paragraph_index={indices[0]} direction='rtl'"
+    if len(indices) > 1 and len(indices) < len([p for p in paragraphs if p.strip()]):
+        return ("ppt_set_paragraph_format direction='rtl' with paragraph_index "
+                + ", ".join(str(i) for i in indices))
+    return "ppt_set_paragraph_format direction='rtl'"
+
+
 def _number_order(slide_index, shapes):
     """A line of numbers only, on a slide that reads right to left.
 
-    PowerPoint gives a paragraph the direction of its first letter, and
-    digits are not letters. "1516 – 1917" on a Hebrew slide is set left to
-    right, so the start year is drawn on the left, and a reader starting on
-    the right reads the range backwards; a list of years comes out the same.
-    Marking the paragraph right to left does not change that on the Mac.
-    A word in the line does: "1516 עד 1917".
+    "1516 – 1917" on a Hebrew slide is drawn left to right, so the start year
+    is on the left and a reader starting on the right reads the range
+    backwards; a list of years comes out the same. Digits are not letters, so
+    nothing in the line says otherwise, and PowerPoint draws it that way on
+    Windows and on the Mac even with the paragraph set right to left. A word
+    in the line, in a paragraph set right to left, reads right: "1516 עד 1917".
     """
     findings = []
     slide_text = " ".join((s.get("text") or {}).get("content") or "" for s in shapes)
     for shape in shapes:
-        content = (shape.get("text") or {}).get("content") or ""
+        text = shape.get("text") or {}
+        content = text.get("content") or ""
         if not content or not shape.get("visible", True):
             continue
         script = _script(content) or _script(slide_text)
         if script not in _RANGE_WORDS:
             continue
-        for line in re.split(r"[\r\n]", content):
-            line = line.strip()
+        paragraphs = _paragraphs(content)
+        directions = text.get("directions") or []
+        for index, paragraph in enumerate(paragraphs, start=1):
+            line = paragraph.strip()
             parts = _numbers_only(line)
             if not parts:
                 continue
@@ -2701,22 +2720,182 @@ def _number_order(slide_index, shapes):
             if len(numbers) < 2 or not any(gap.strip() for gap in gaps):
                 continue
             name = shape["name"]
+            set_rtl = (index <= len(directions) and directions[index - 1] == "rtl")
+            then = "" if set_rtl else (
+                f", then set the line right to left "
+                f"({_direction_call(paragraphs, [index])}), which PowerPoint for "
+                "Windows needs to draw it from the right")
             if len(numbers) == 2:
                 example = _RANGE_WORDS[script].format(a=numbers[0], b=numbers[1])
                 how = (f"replace it with \"{example}\" (ppt_find_replace_text "
-                       f"find_text=\"{line}\" replace_text=\"{example}\")")
+                       f"find_text=\"{line}\" replace_text=\"{example}\"){then}")
             else:
                 how = (f"start it with a {script} word, the label it belongs to "
-                       f"(ppt_find_replace_text find_text=\"{line}\")")
+                       f"(ppt_find_replace_text find_text=\"{line}\"){then}")
             findings.append(_finding(
                 slide_index, "number_order", [name],
                 f"'{name}' has a line of numbers only, \"{line}\", on a slide "
                 f"that reads right to left. With no letter in it, PowerPoint "
-                f"sets the line left to right, so \"{numbers[0]}\" is drawn on "
-                f"the left and a {script} reader reads \"{numbers[-1]}\" first.",
-                f"Put a word in the line, so it reads right to left: {how}.",
+                f"draws the line left to right, so \"{numbers[0]}\" is on the "
+                f"left and a {script} reader reads \"{numbers[-1]}\" first.",
+                f"Put a word in the line: {how}.",
                 line=line,
             ))
+    return findings
+
+
+def _drawn_order(line, right_to_left, digits_as_letters=False):
+    """The characters of one paragraph in the order they are drawn, left to
+    right, in a paragraph of the given direction.
+
+    The Unicode bidirectional algorithm for a line with no embeddings: weak
+    types resolved (W1-W7), neutrals (N1-N2), levels (I1-I2), then each run
+    from the highest level down reversed (L2). Enough to tell whether a
+    paragraph draws the same both ways, which is all it is asked.
+
+    PowerPoint for Mac follows it. PowerPoint for Windows was seen drawing
+    digits as if they were Latin letters: "1516 עד 1917", set left to right,
+    as 1516, the word, 1917, where the algorithm puts both numbers on the
+    left. ``digits_as_letters`` draws them that way.
+    """
+    base = "R" if right_to_left else "L"
+    kinds = []
+    for ch in line:
+        kind = unicodedata.bidirectional(ch) or "L"
+        if digits_as_letters and kind == "EN":
+            kind = "L"
+        if kind in ("LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI", "BN"):
+            kind = "ON"
+        kinds.append(kind)
+    # W1: a combining mark takes the type of what it marks.
+    for i, kind in enumerate(kinds):
+        if kind == "NSM":
+            kinds[i] = kinds[i - 1] if i else base
+    # W2, W3: a European number after Arabic letters is an Arabic number.
+    strong = base
+    for i, kind in enumerate(kinds):
+        if kind in ("L", "R", "AL"):
+            strong = kind
+        elif kind == "EN" and strong == "AL":
+            kinds[i] = "AN"
+    kinds = ["R" if kind == "AL" else kind for kind in kinds]
+    # W4: one separator between two numbers of a kind joins them.
+    for i in range(1, len(kinds) - 1):
+        before, after = kinds[i - 1], kinds[i + 1]
+        if kinds[i] == "ES" and before == after == "EN":
+            kinds[i] = "EN"
+        elif kinds[i] == "CS" and before == after and before in ("EN", "AN"):
+            kinds[i] = "EN" if before == "EN" else "AN"
+    # W5: currency and percent signs beside a European number belong to it.
+    for i, kind in enumerate(kinds):
+        if kind != "ET":
+            continue
+        j = i
+        while j < len(kinds) and kinds[j] == "ET":
+            j += 1
+        k = i
+        while k > 0 and kinds[k - 1] == "ET":
+            k -= 1
+        if (j < len(kinds) and kinds[j] == "EN") or (k > 0 and kinds[k - 1] == "EN"):
+            for m in range(k, j):
+                kinds[m] = "EN"
+    # W6, W7.
+    kinds = ["ON" if kind in ("ES", "ET", "CS") else kind for kind in kinds]
+    strong = base
+    for i, kind in enumerate(kinds):
+        if kind in ("L", "R"):
+            strong = kind
+        elif kind == "EN" and strong == "L":
+            kinds[i] = "L"
+    # N1, N2: neutrals between two of a direction take it, numbers counting
+    # as right to left; the rest take the paragraph's.
+    def direction(kind):
+        return "L" if kind == "L" else "R" if kind in ("R", "EN", "AN") else None
+    i = 0
+    while i < len(kinds):
+        if direction(kinds[i]) is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(kinds) and direction(kinds[j]) is None:
+            j += 1
+        before = direction(kinds[i - 1]) if i else base
+        after = direction(kinds[j]) if j < len(kinds) else base
+        for m in range(i, j):
+            kinds[m] = before if before == after else base
+        i = j
+    # I1, I2.
+    level = 1 if right_to_left else 0
+    levels = []
+    for kind in kinds:
+        if level == 0:
+            levels.append(1 if kind == "R" else 2 if kind in ("EN", "AN") else 0)
+        else:
+            levels.append(2 if kind in ("L", "EN", "AN") else 1)
+    # L2.
+    order = list(range(len(line)))
+    for top in range(max(levels, default=0), 0, -1):
+        i = 0
+        while i < len(order):
+            if levels[order[i]] < top:
+                i += 1
+                continue
+            j = i
+            while j < len(order) and levels[order[j]] >= top:
+                j += 1
+            order[i:j] = order[i:j][::-1]
+            i = j
+    return "".join(line[i] for i in order)
+
+
+def _text_direction(slide_index, shapes):
+    """Hebrew or Arabic paragraphs left set left to right.
+
+    PowerPoint for Windows draws a paragraph in the direction it is set,
+    whatever its letters, and a paragraph is left to right until it is set
+    otherwise: the text keeps to the left of the paragraph, a full stop or a
+    question mark ends up on the left of the line, and a number in it is
+    read in the wrong place, "1516 עד 1917" as 1917 to 1516. PowerPoint for
+    Mac draws by the first letter instead, so the slide looks right there and
+    reads wrong once it is opened on Windows. A paragraph that draws the same
+    either way, words alone, is not reported.
+    """
+    findings = []
+    for shape in shapes:
+        text = shape.get("text") or {}
+        directions = text.get("directions")
+        content = text.get("content") or ""
+        if not directions or not content or not shape.get("visible", True):
+            continue
+        paragraphs = _paragraphs(content)
+        wrong, mixed = [], []
+        for index, (paragraph, direction) in enumerate(zip(paragraphs, directions), start=1):
+            if direction != "ltr" or _script(paragraph) not in _RANGE_WORDS:
+                continue
+            first = next((ch for ch in paragraph
+                          if unicodedata.bidirectional(ch) in _LEFT_TO_RIGHT | _RIGHT_TO_LEFT), "")
+            if unicodedata.bidirectional(first) not in _RIGHT_TO_LEFT:
+                continue
+            wrong.append(index)
+            line = paragraph.strip()
+            if any(_drawn_order(line, False, digits) != _drawn_order(line, True, digits)
+                   for digits in (False, True)):
+                mixed.append(line)
+        if not mixed:
+            continue
+        name = shape["name"]
+        sample = mixed[0] if len(mixed[0]) <= 40 else mixed[0][:40] + "…"
+        lines = "a paragraph" if len(wrong) == 1 else f"{len(wrong)} paragraphs"
+        findings.append(_finding(
+            slide_index, "text_direction", [name],
+            f"'{name}' has {lines} of {_script(content)} set left to right, such "
+            f"as \"{sample}\". PowerPoint for Windows draws them that way: the "
+            "punctuation and numbers in them land on the wrong side. PowerPoint "
+            "for Mac goes by the first letter instead, so the slide reads right "
+            "there and wrong on Windows.",
+            f"Set them right to left ({_direction_call(paragraphs, wrong)}).",
+            paragraphs=wrong,
+        ))
     return findings
 
 
@@ -2767,6 +2946,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
         + _number_order(index, shapes)
+        + _text_direction(index, shapes)
     )
     if only is not None:
         # Text on a touched card is drawn on its fill, so whether it can still
@@ -3396,7 +3576,32 @@ def _text_facts(shape, full):
         {"color_hex": colour, "size": size, "bold": bold, "font": name, "theme": theme}
         for colour, size, bold, name, theme in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
+    if has_right_to_left(content):
+        facts["directions"] = _directions(tr)
     return facts
+
+
+def has_right_to_left(content) -> bool:
+    """Whether the text has a Hebrew or Arabic letter, so its paragraphs'
+    direction is worth reading."""
+    return any(unicodedata.bidirectional(ch) in _RIGHT_TO_LEFT for ch in content)
+
+
+def _directions(tr):
+    """Each paragraph's direction as set, 'rtl' or 'ltr', None where unread."""
+    try:
+        count = tr.Paragraphs().Count
+    except Exception:
+        return None
+    directions = []
+    for i in range(1, count + 1):
+        try:
+            value = tr.Paragraphs(i).ParagraphFormat.TextDirection
+        except Exception:
+            value = None
+        directions.append({ppDirectionRightToLeft: "rtl",
+                           ppDirectionLeftToRight: "ltr"}.get(value))
+    return directions
 
 
 def _geometry_facts(shape, z):

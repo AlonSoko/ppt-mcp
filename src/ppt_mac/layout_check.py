@@ -216,7 +216,7 @@ def _text_facts(shape, full):
     shape that is read only for where its text sits costs one event. In full,
     the frame's record and the character columns are added.
     """
-    from ppt_com.layout_check import _CONTENT_KEPT
+    from ppt_com.layout_check import _CONTENT_KEPT, has_right_to_left
 
     frame = shape.text_frame
     facts = {
@@ -251,7 +251,29 @@ def _text_facts(shape, full):
             pass
     if full:
         facts["runs"] = _run_styles(tr)
+        if has_right_to_left(content):
+            facts["directions"] = _directions(tr, content)
     return facts
+
+
+def _directions(tr, content):
+    """The macOS half of ppt_com.layout_check._directions, in one event.
+
+    A text of one paragraph answers its one value rather than a list.
+    """
+    from ppt_com.layout_check import _paragraphs
+
+    names = {k.right_to_left: "rtl", k.left_to_right: "ltr"}
+    try:
+        values = tr.paragraphs.paragraph_format.text_direction.get()
+    except Exception:
+        logger.debug("Cannot read the paragraphs' direction", exc_info=True)
+        return None
+    if not isinstance(values, list):
+        if len(_paragraphs(content)) != 1:
+            return None
+        values = [values]
+    return [names.get(value) for value in values]
 
 
 def _geometry_facts(shape, record, z):
