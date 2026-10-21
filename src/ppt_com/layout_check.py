@@ -3291,7 +3291,7 @@ def _text_direction(slide_index, shapes):
 _PICTURES = frozenset({msoPicture, msoLinkedPicture})
 
 
-def _stretched(slide_index, shapes):
+def _stretched(slide_index, shapes, slide_area=None):
     """A picture drawn in other proportions than its image's.
 
     A photo or a logo given both a width and a height that do not match it is
@@ -3329,14 +3329,22 @@ def _stretched(slide_index, shapes):
             # ones too: given a new width, its height follows.
             fix = (f"Unlock its proportions first (ppt_lock_aspect_ratio "
                    f"locked=false), then {fix[0].lower()}{fix[1:]}")
+        crop = (f"Crop the image to the proportions it is drawn at, keeping its size "
+                f"(ppt_crop_picture shape_name_or_index='{name}' crop_fit='shape')")
         stretch = round(abs(ratio - 1) * 100) if ratio > 1 else round(abs(1 / ratio - 1) * 100)
+        # A photo was given its box on purpose, and cropping keeps the box and
+        # the slide around it; a logo cropped loses part of its mark.
+        small = slide_area and shape["width"] * shape["height"] < _LOGO_SHARE * slide_area
+        if small:
+            fix = f"{fix}, or {crop[0].lower()}{crop[1:]}"
+        else:
+            fix = f"{crop}, or {fix[0].lower()}{fix[1:]}"
         findings.append(_finding(
             slide_index, "stretched_picture", [name],
             f"'{name}' is stretched: it is drawn {_pt(shape['width'])} by "
             f"{_pt(shape['height'])}, {stretch}% {how} for its size than its "
             f"image, so what is in it looks squeezed.",
-            f"{fix}, or crop the image to these proportions instead of "
-            "stretching it (ppt_crop_picture).",
+            f"{fix}.",
             stretch_pct=stretch,
         ))
     return findings
@@ -3514,7 +3522,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _sample_text(index, shapes)
         + _chart_sample_data(index, shapes)
         + _fonts(index, shapes, slide.get("theme_fonts"))
-        + _stretched(index, shapes)
+        + _stretched(index, shapes, slide_w * slide_h)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
     )

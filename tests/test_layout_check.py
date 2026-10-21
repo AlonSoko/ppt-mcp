@@ -2812,11 +2812,15 @@ class TestStretchedPictures:
         [finding] = check(picture("Photo", 100, 100, 400, 200, aspect=4 / 3))
         assert finding["type"] == "stretched_picture"
         assert finding["stretch_pct"] == 50
+        assert finding["fix"].startswith(
+            "Crop the image to the proportions it is drawn at, keeping its size "
+            "(ppt_crop_picture shape_name_or_index='Photo' crop_fit='shape'), or make it")
         assert "ppt_update_shape width=266.67 left=166.67" in finding["fix"]
 
-    def test_a_picture_squeezed_is_made_shorter(self):
-        [finding] = check(picture("Logo", 100, 100, 200, 200, aspect=2.0))
-        assert "ppt_update_shape height=100 top=150" in finding["fix"]
+    def test_a_logo_squeezed_is_made_shorter_before_it_is_cropped(self):
+        [finding] = check(picture("Logo", 100, 100, 80, 80, aspect=2.0))
+        assert finding["fix"].startswith("Make it 40 pt shorter")
+        assert "ppt_update_shape height=40 top=120" in finding["fix"]
 
     def test_a_point_of_rounding_is_not(self):
         assert check(picture("Photo", 100, 100, 400, 301, aspect=4 / 3)) == []
@@ -2837,7 +2841,7 @@ def test_a_locked_stretched_picture_is_unlocked_first():
     photo = picture("Photo", 100, 100, 400, 200, aspect=4 / 3)
     photo["lock_aspect"] = True
     [finding] = check(photo)
-    assert finding["fix"].startswith("Unlock its proportions first (ppt_lock_aspect_ratio locked=false), then make it")
+    assert "or unlock its proportions first (ppt_lock_aspect_ratio locked=false), then make it" in finding["fix"]
 
 
 # ---------------------------------------------------------------------------
@@ -3395,3 +3399,29 @@ def test_a_theme_naming_no_right_to_left_font_leaves_it_to_powerpoint():
     page = slide(styled("body", 30, "Calibri", content="שלום, עולם.", script_font="Arial"))
     page["theme_fonts"] = {"latin": ["Calibri Light", "Calibri"], "script": []}
     assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []
+
+
+class TestCropToFit:
+    def test_shape_keeps_the_box_and_crops_the_image(self):
+        from ppt_com.advanced_ops import _fit_aspect, _fit_crops, _fit_size
+        # A 3:2 image in a 16:9 box.
+        aspect = _fit_aspect("shape", 960, 540)
+        crops = _fit_crops(300, 200, aspect, 0.5)
+        assert crops["left"] == crops["right"] == 0
+        assert crops["top"] == pytest.approx(crops["bottom"])
+        assert (200 - crops["top"] - crops["bottom"]) * aspect == pytest.approx(300)
+        assert _fit_size(960, 540, aspect, "shape") == (960, 540)
+
+    def test_a_ratio_fits_inside_the_box(self):
+        from ppt_com.advanced_ops import _fit_aspect, _fit_size
+        assert _fit_size(400, 400, _fit_aspect("16:9"), "16:9") == (400, 225)
+
+    def test_square_is_as_before(self):
+        from ppt_com.advanced_ops import _fit_aspect, _fit_crops
+        assert _fit_crops(400, 300, _fit_aspect("square"), 0.5) == {
+            "left": 50.0, "right": 50.0, "top": 0.0, "bottom": 0.0}
+
+    def test_anything_else_is_refused(self):
+        from ppt_com.advanced_ops import _fit_aspect
+        with pytest.raises(ValueError, match="Supported values"):
+            _fit_aspect("wide")
