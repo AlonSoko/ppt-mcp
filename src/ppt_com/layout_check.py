@@ -1751,7 +1751,8 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         if not backdrop or (trust and _as_designed(shape, painted_by, follows_background)):
             continue
         if isinstance(backdrop, dict):
-            found = _gradient_contrast(slide_index, shape, shapes, backdrop, painted_by, painter)
+            found = _gradient_contrast(slide_index, shape, shapes, backdrop, painted_by, painter,
+                                       theme_colors)
             if found is not None:
                 findings.append(found)
             continue
@@ -1774,8 +1775,11 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         # one slide; black or white is the answer when none of them is enough.
         ours = [c for c in _text_colours(shapes, shape, size)
                 if _contrast_ratio(c, backdrop) >= needed]
+        themed = _theme_text_colours(theme_colors, lambda c: _contrast_ratio(c, backdrop), needed)
         if ours:
             suggestion, source = ours[0], ", the colour of the other text on the slide"
+        elif themed:
+            suggestion, source = themed[0], ", the theme's text colour"
         else:
             dark, light = _contrast_ratio("#000000", backdrop), _contrast_ratio("#FFFFFF", backdrop)
             suggestion, source = ("#000000" if dark >= light else "#FFFFFF"), ""
@@ -1812,6 +1816,18 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
             contrast=round(ratio, 2), minimum=needed,
         ))
     return findings
+
+
+def _theme_text_colours(theme_colors, ratio, needed):
+    """The theme's text colours that read on a backdrop, best first.
+
+    A write reads only the shape it touched, so the slide's other text
+    colours are not known to it; the theme's are, and keep the slide in its
+    palette where black or white would not.
+    """
+    found = [colour for key in ("dark1", "light1", "dark2", "light2")
+             if (colour := (theme_colors or {}).get(key)) and ratio(colour) >= needed]
+    return sorted(dict.fromkeys(found), key=ratio, reverse=True)
 
 
 def _text_colours(shapes, exclude, size=None):
@@ -1851,7 +1867,7 @@ def _theme_trouble(colours):
     return None
 
 
-def _gradient_contrast(slide_index, shape, shapes, paint, painted_by, painter):
+def _gradient_contrast(slide_index, shape, shapes, paint, painted_by, painter, theme_colors=None):
     """Text too faint on some of the gradient behind it, or None.
 
     Where a linear gradient's angle is known, the colours behind the text are
@@ -1902,9 +1918,12 @@ def _gradient_contrast(slide_index, shape, shapes, paint, painted_by, painter):
     everywhere = [c for colours in blends for c in colours]
     ours = [c for c in _text_colours(shapes, shape, size)
             if min(_contrast_ratio(c, b) for b in everywhere) >= needed]
-    choices = [(c, ", the colour of the other text on the slide") for c in ours[:1]] + [
+    themed = _theme_text_colours(theme_colors, lambda c: min(_contrast_ratio(c, b) for b in everywhere),
+                                 needed)
+    choices = ([(c, ", the colour of the other text on the slide") for c in ours[:1]]
+               + [(c, ", the theme's text colour") for c in themed[:1]] + [
         (c, "") for c in ("#000000", "#FFFFFF")
-        if min(_contrast_ratio(c, b) for b in everywhere) >= needed]
+        if min(_contrast_ratio(c, b) for b in everywhere) >= needed])
     if choices:
         suggestion, source = choices[0]
         least = min(_contrast_ratio(suggestion, b) for b in everywhere)

@@ -3107,3 +3107,29 @@ class TestTitleCapitals:
         slides = [self.worded_title(2, "איפה אנחנו"), self.worded_title(3, "מה השתנה"),
                   self.worded_title(4, "NEXT STEPS")]
         assert deck_findings(slides, H, W) == []
+
+
+class TestContrastSuggestsTheTheme:
+    THEME = {"dark1": "#1B2A41", "light1": "#FAF7F2", "dark2": "#44546A", "light2": "#E7E6E6"}
+
+    def grey_on(self, background):
+        grey = textbox("grey", 100, 100, 300, 40,
+                       runs=[{"color_hex": "#777777", "size": 14.0, "bold": False}])
+        page = slide(grey, background=background)
+        page["theme_colors"] = self.THEME
+        return page
+
+    def test_a_write_that_knows_no_other_text_suggests_the_themes_colour(self):
+        [finding] = slide_findings(self.grey_on("#FFFFFF"), W, H, only={"grey"})
+        assert "make the text #1B2A41, the theme's text colour" in finding["fix"].lower().replace("#1b2a41", "#1B2A41")
+
+    def test_on_a_dark_background_the_themes_light_colour(self):
+        [finding] = slide_findings(self.grey_on("#101010"), W, H, only={"grey"})
+        assert "#FAF7F2, the theme's text colour" in finding["fix"]
+
+    def test_the_slides_own_text_colour_comes_first(self):
+        page = self.grey_on("#FFFFFF")
+        page["shapes"].append(textbox("body", 100, 200, 300, 40, z=2,
+                                      runs=[{"color_hex": "#0B2545", "size": 14.0, "bold": False}]))
+        [finding] = [f for f in slide_findings(page, W, H) if f["type"] == "low_contrast"]
+        assert "#0B2545, the colour of the other text on the slide" in finding["fix"]
