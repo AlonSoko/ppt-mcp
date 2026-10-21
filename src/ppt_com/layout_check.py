@@ -212,13 +212,13 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
-    "text_direction", "stretched_picture",
+    "text_direction", "stretched_picture", "title_edge",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
-    "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
+    "narrow_margin", "misaligned", "title_edge", "uneven_spacing", "uneven_sizes",
     "number_order", "text_direction", "empty_placeholder", "sample_text", "chart_sample_data",
     "inconsistent_titles",
     "inconsistent_body_text",
@@ -1453,7 +1453,7 @@ def _template_resize(a, union, named, layout):
     return None
 
 
-def _fit_row(mates, layout, low, start, end, kind, named):
+def _fit_row(mates, layout, low, start, end, kind, named, lead=None):
     """Narrow a row (or column) of like shapes evenly to fit between ``start`` and ``end``.
 
     Either bound may be None, and then that end of the row stays where it is.
@@ -1486,8 +1486,8 @@ def _fit_row(mates, layout, low, start, end, kind, named):
         way = ("right" if by > 0 else "left") if low == 0 else ("down" if by > 0 else "up")
         moves.append(f"'{name}'{with_it} {way} by {_pt(abs(by))} (ppt_update_shape shape_names="
                      f"{[name] + carried} d{position}={_num(by)})")
-    fix = (f"Make the {kind} fit before {named}: ppt_update_shape shape_names={members} "
-           f"{field}={_num(size)}")
+    fix = (f"{lead or f'Make the {kind} fit before {named}'}: ppt_update_shape "
+           f"shape_names={members} {field}={_num(size)}")
     if moves:
         fix += f", then move {', and '.join(moves)}"
     return fix + f". The gaps stay {_pt(gap)}."
@@ -2247,6 +2247,103 @@ def _misaligned_finding(slide_index, slip, placed):
         f"{edge} of {others}, close enough to look like a slip.",
         fix, severity="warning", edge=edge, off_by_pt=round(abs(delta), 2),
     )
+
+
+# A title whose letters start this far from the edge the slide's body keeps,
+# and no further, was meant to line up with it: further is a layout that sets
+# the title apart on purpose, an indented band or a side column.
+_TITLE_BODY_MIN = 2.0
+_TITLE_BODY_MAX = 12.0
+
+
+def _title_body_edge(slide_index, shapes, layout):
+    """A title whose letters do not start where the body below it does.
+
+    A title box set at the same left as the cards under it starts its words
+    one inset further in, 7.2 pt by default, and the eye reads the title and
+    the body as two edges a little apart. A right-set title, a Hebrew deck's,
+    is held to the body's right edge. The template's own title over its own
+    body placeholder is its design and left alone.
+    """
+    slide_w, slide_h = layout["slide_width"], layout["slide_height"]
+    title = find_title({"shapes": shapes}, slide_h) if slide_h else None
+    if title is None:
+        return []
+    side = _title_side(title)
+    words = text_box(title)
+    if side == "center" or words is None:
+        return []
+    right = side == "right"
+    body = []
+    for shape in layout["arranged"]:
+        if (shape is title or layout["depth"].get(shape["name"]) != 0
+                or shape.get("placeholder_type") in _LAYOUT_PLACEHOLDERS):
+            continue
+        ink = ink_box(shape)
+        if ink is None or ink[1] < words[3] - _EDGE_TOLERANCE:
+            continue
+        # A shape run off an edge is a bleed, not part of the column.
+        if ink[0] <= _EDGE_TOLERANCE or (slide_w and ink[2] >= slide_w - _EDGE_TOLERANCE):
+            continue
+        body.append((shape, ink))
+    if not body:
+        return []
+    edge = max(ink[2] for _, ink in body) if right else min(ink[0] for _, ink in body)
+    keepers = [s for s, ink in body if abs((ink[2] if right else ink[0]) - edge) <= _ALIGNED]
+    delta = (words[2] if right else words[0]) - edge
+    if not _TITLE_BODY_MIN < abs(delta) <= _TITLE_BODY_MAX:
+        return []
+    if title.get("placeholder_type") is not None and all(
+            k.get("placeholder_type") is not None for k in keepers):
+        return []
+    name = title["name"]
+    others = ", ".join(f"'{k['name']}'" for k in keepers)
+    where = "right" if right else "left"
+    if delta > 0:
+        direction = "left of" if right else "right of"
+    else:
+        direction = "right of" if right else "left of"
+    return [_finding(
+        slide_index, "title_edge", [name] + [k["name"] for k in keepers],
+        f"The {where} end of the title's words in '{name}' is {_pt(abs(delta))} "
+        f"{direction} the {where} edge of {others} below it, so the title and "
+        "the body read as two edges a little apart.",
+        _body_to_title(keepers, delta, right, layout),
+        severity="warning", edge=where, off_by_pt=round(abs(delta), 2),
+    )]
+
+
+def _body_to_title(keepers, delta, right, layout):
+    """Bring the body's edge to the title's words, keeping its other edge.
+
+    The body moves rather than the title, since where a deck's titles sit is
+    held from slide to slide. A row of cards is fitted again with its gaps
+    kept, and each card carries what is on it.
+    """
+    boxes = layout["boxes"]
+    side = "right" if right else "left"
+    lead = f"Bring the body's {side} edge to the title's words"
+    row = layout["rows"].get(keepers[0]["name"])
+    if row and len(row) > 1:
+        edge = boxes[keepers[0]["name"]][2 if right else 0] + delta
+        fix = _fit_row(row, layout, 0, None if right else edge, edge if right else None,
+                       "row", "", lead=lead)
+        if fix:
+            return fix
+    calls = []
+    for keeper in keepers:
+        carried = [s["name"] for s in layout["arranged"]
+                   if s is not keeper and s["name"] in boxes and _belongs_to(s, keeper, boxes)]
+        if right:
+            calls.append(f"ppt_update_shape shape_name='{keeper['name']}' dwidth={_num(delta)}")
+        elif carried:
+            calls.append(f"ppt_update_shape shape_names={[keeper['name']] + carried} "
+                         f"dleft={_num(delta)}, then ppt_update_shape shape_name="
+                         f"'{keeper['name']}' dwidth={_num(-delta)}")
+        else:
+            calls.append(f"ppt_update_shape shape_name='{keeper['name']}' "
+                         f"dleft={_num(delta)} dwidth={_num(-delta)}")
+    return f"{lead}, keeping its {'left' if right else 'right'} edge: {'; '.join(calls)}."
 
 
 def _connected(members, joined):
@@ -3058,6 +3155,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
         + _misaligned(index, layout, only=only)
+        + _title_body_edge(index, shapes, layout)
         + _off_centre_labels(index, layout)
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)

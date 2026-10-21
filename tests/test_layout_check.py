@@ -904,6 +904,14 @@ def recorded(name):
     return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
+@pytest.fixture
+def without_title_edge(monkeypatch):
+    """The recorded decks were judged before titles were held to the body's
+    edge, and their tests are about the other checks. Which of their titles
+    are off the body's edge is pinned in TestTitleEdge."""
+    monkeypatch.setattr(layout_check, "_title_body_edge", lambda *args: [])
+
+
 def findings_by_slide(deck):
     return {
         s["slide_index"]: [(f["type"], f["shapes"][0])
@@ -912,6 +920,7 @@ def findings_by_slide(deck):
     }
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestARealDeck:
     SEEN = {
         1: [],                                   # cover: centred placeholders, corner logo
@@ -969,6 +978,7 @@ class TestARealDeck:
         assert deck_findings(deck["slides"], deck["slide_height"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestASecondRealDeck:
     # Eleven more slides, the patterns the first deck did not have: a photo
     # filling half the slide, a pricing row with its middle plan featured,
@@ -1029,6 +1039,7 @@ def fixes_of(deck):
     return fixes
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestAThemedDeck:
     # Ten slides on PowerPoint's Badge theme, built through its layouts and
     # placeholders: a dark band down the left edge and a yellow strip down the
@@ -1078,6 +1089,7 @@ class TestAThemedDeck:
         assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestACompanyTemplateDeck:
     # Ten slides on a company-style template: a navy bar across the top, an
     # ACME logo bottom right and a confidentiality line bottom left, on the
@@ -1116,6 +1128,7 @@ class TestACompanyTemplateDeck:
         assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestACompanyTemplateDeckOnWindows:
     # The company-style template again, built on Windows through layouts
     # picked by name ("Acme Content", "Acme Section"), with a photo, icons and
@@ -1148,6 +1161,7 @@ class TestACompanyTemplateDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestAThemedDeckOnWindows:
     # PowerPoint's Retrospect theme on Windows, where a layout's own graphics
     # can be read: a footer band and a line above it on the master, and a dark
@@ -1188,6 +1202,7 @@ class TestAThemedDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestARightToLeftDeckOnWindows:
     # Eight Hebrew slides built on Windows, titles and text set right, as a
     # model writing Hebrew sets them: a title's right edge stays put from slide
@@ -1219,6 +1234,7 @@ class TestARightToLeftDeckOnWindows:
         assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestARightToLeftDeckOnMac:
     # The Hebrew deck again, on PowerPoint for Mac, with a ninth slide on the
     # layout's own title and body: a two-line title in the title placeholder
@@ -1291,6 +1307,7 @@ class TestGradientsAndThemesChangedByHand:
             assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestADeckOnTwoDesigns:
     # Office Theme on slides 1-3 and Retrospect on 4-5, on Windows. Each design
     # has a "Title Only" layout of its own, and each styles its title its own
@@ -1313,6 +1330,7 @@ class TestADeckOnTwoDesigns:
         assert all(found == [] for found in findings_by_slide(fixed).values())
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestThemesDrawnInLinesOnWindows:
     # Slice, a fan of thin lines in the bottom right corner, and Wisp, curves
     # down the left: both on the master, as groups whose boxes are mostly
@@ -2210,6 +2228,7 @@ class TestBarsOfAChart:
         assert "uneven_sizes" in kinds(check(*self.bars(100, 104, 99, 103)))
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestWhatTheCoffeeDeckTaught:
     # Live, a deck on coffee built a slide at a time: three kinds of finding
     # that a model told to act on every finding would have acted on, and
@@ -2260,6 +2279,7 @@ class TestWhatTheCoffeeDeckTaught:
         assert deck_findings(deck["slides"], deck["slide_height"], deck["slide_width"]) == []
 
 
+@pytest.mark.usefixtures("without_title_edge")
 class TestADesignedDeckOnTheMac:
     # Twelve slides on beer, built on PowerPoint for Mac through the server:
     # photos, icons, cards with shadows, a timeline, a colour scale, and a bar
@@ -2932,3 +2952,73 @@ def test_a_chart_in_the_file_is_read(tmp_path):
     from utils.package import package_facts
     chart = package_facts(path, [1])["charts"][1]["Chart 3"]
     assert chart["categories"] == ["Category 1"] and chart["series"][0]["name"] == "Series 1"
+
+
+
+# ---------------------------------------------------------------------------
+# A title's words held to the body's edge
+# ---------------------------------------------------------------------------
+class TestTitleEdge:
+    @staticmethod
+    def big(shape):
+        shape["text"]["runs"] = [{"color_hex": "#222222", "size": 32.0, "bold": True}]
+        return shape
+
+    def test_a_title_box_set_on_the_cards_edge_starts_its_words_inside_it(self):
+        # The title frame at 40 like the cards, its words at 47.2.
+        shapes = titled_row()
+        self.big(shapes[0])
+        [finding] = [f for f in check(*shapes) if f["type"] == "title_edge"]
+        assert finding["shapes"] == ["title", "card0"]
+        assert finding["off_by_pt"] == 7.2
+        # The row is fitted again from the title's words to where it ended.
+        assert finding["fix"].startswith(
+            "Bring the body's left edge to the title's words: ppt_update_shape "
+            "shape_names=['card0', 'card1', 'card2'] width=277.6")
+        assert "The gaps stay 20 pt." in finding["fix"]
+
+    def test_a_single_shape_is_moved_and_narrowed(self):
+        title = self.big(textbox("title", 40, 30, 880, 55.74, z=1, text_width=300, text_height=48))
+        chart = card("chart", 40, 140, 880, 300, z=2)
+        [finding] = [f for f in check(title, chart) if f["type"] == "title_edge"]
+        assert finding["fix"].endswith(
+            "ppt_update_shape shape_name='chart' dleft=7.2 dwidth=-7.2.")
+
+    def test_words_on_the_edge_are_not(self):
+        shapes = titled_row()
+        shapes[0] = self.big(textbox("title", 32.8, 30, 880, 55.74, z=1, text_width=300, text_height=48))
+        assert [f for f in check(*shapes) if f["type"] == "title_edge"] == []
+
+    def test_a_title_set_well_apart_is_a_design(self):
+        shapes = titled_row()
+        shapes[0] = self.big(textbox("title", 80, 30, 800, 55.74, z=1, text_width=300, text_height=48))
+        assert [f for f in check(*shapes) if f["type"] == "title_edge"] == []
+
+    def test_a_right_set_title_is_held_to_the_right_edge(self):
+        shapes = titled_row()
+        shapes[0] = self.big(placed("title", 40, 30, 880, 55.74, 920 - 7.2 - 300, 33.6, 300, 48))
+        [finding] = [f for f in check(*shapes) if f["type"] == "title_edge"]
+        assert finding["edge"] == "right"
+        assert finding["fix"].startswith("Bring the body's right edge to the title's words")
+
+    def test_the_recorded_decks(self):
+        found = {}
+        for path in sorted(FIXTURES.glob("*fixed*.json")):
+            deck = json.loads(path.read_text(encoding="utf-8"))
+            slides = [s["slide_index"] for s in deck["slides"]
+                      for f in slide_findings(s, deck["slide_width"], deck["slide_height"])
+                      if f["type"] == "title_edge"]
+            if slides:
+                found[path.stem] = slides
+        assert found == self.SEEN
+
+    # Each a title box or placeholder over cards, a chart, a table or a
+    # picture: its words 7.2 pt in from the frame, 8.6 pt where its frame's
+    # insets are wider.
+    SEEN = {
+        "companydeck_fixed_mac": [4, 5], "companydeck_fixed_win": [4, 5, 11],
+        "mmdeck_fixed_win": [4, 5], "realdeck2_fixed_mac": [2, 3, 11],
+        "realdeck_fixed_mac": [3, 4, 7, 8, 9, 12], "retrodeck_fixed_win": [6, 8],
+        "rtldeck_fixed_mac": [3, 7], "rtldeck_fixed_win": [3, 7],
+        "themedeck_fixed_mac": [9], "wispdeck_fixed_win": [3],
+    }
