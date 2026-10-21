@@ -2690,6 +2690,103 @@ def _narrow_margins(slide_index, layout, slide_w):
     return findings
 
 
+# A picture smaller than this share of the slide is a logo or an icon, set in
+# a corner on purpose. Text less tall than this share of the slide is a
+# footnote or a page number, set low on purpose.
+_LOGO_SHARE = 0.03
+_BLOCK_SHARE = 0.10
+
+# The most room the top and bottom are held to: the edge is crowded within
+# half of it.
+_VERTICAL_ROOM = 40.0
+
+
+def _vertical_margins(slide_index, layout, slide_h):
+    """Content run almost to the top or the bottom edge of the slide.
+
+    The side margins say how much room a slide keeps; a card, a chart or a
+    block of text that stops a few points short of the bottom edge looks
+    pushed against it. Touching the edge is a bleed and is left alone, and so
+    are a footnote or a logo set low, which are placed there. A row of cards
+    is one finding, moved or shortened together.
+    """
+    margins = layout["margins"]
+    slide_w = layout["slide_width"]
+    if not margins or not slide_h or not slide_w:
+        return []
+    # A slide with nothing near its top, a quote set in the middle, says
+    # little about how close to the edge it means things to go.
+    want = min(margins["vertical"], _VERTICAL_ROOM)
+    boxes = layout["boxes"]
+    crowded = {}
+    for shape in layout["arranged"]:
+        if layout["depth"][shape["name"]] or shape.get("placeholder_type") in _LAYOUT_PLACEHOLDERS:
+            continue
+        ink = ink_box(shape)
+        if ink is None:
+            continue
+        if paints_box(shape):
+            if (shape.get("type") in _PICTURES
+                    and _width(ink) * _height(ink) < _LOGO_SHARE * slide_w * slide_h):
+                continue
+        elif _height(ink) < _BLOCK_SHARE * slide_h:
+            continue
+        for edge, distance in (("top", ink[1]), ("bottom", slide_h - ink[3])):
+            if _EDGE_TOLERANCE < distance < want / 2:
+                crowded[shape["name"]] = (shape, ink, edge, distance)
+                break
+    findings, done = [], set()
+    for name, (shape, ink, edge, distance) in crowded.items():
+        if name in done:
+            continue
+        row = [m for m in layout["rows"].get(name) or [name] if m in crowded
+               and crowded[m][2] == edge] or [name]
+        done.update(row)
+        by = want - min(crowded[m][3] for m in row)
+        inks = [crowded[m][1] for m in row]
+        # Moving away from the edge runs into whatever is on the other side.
+        if edge == "bottom":
+            near = min(ink[1] for ink in inks)
+            others = [ink_box(s) for s in layout["arranged"] if s["name"] not in row
+                      and not layout["depth"][s["name"]]]
+            room = min([near - o[3] for o in others if o and o[3] <= near + _EDGE_TOLERANCE
+                        and _shared((o[0], 0, o[2], 1), (min(i[0] for i in inks), 0,
+                                                         max(i[2] for i in inks), 1))[0] > 0],
+                       default=near)
+        else:
+            far = max(ink[3] for ink in inks)
+            others = [ink_box(s) for s in layout["arranged"] if s["name"] not in row
+                      and not layout["depth"][s["name"]]]
+            room = min([o[1] - far for o in others if o and o[1] >= far - _EDGE_TOLERANCE
+                        and _shared((o[0], 0, o[2], 1), (min(i[0] for i in inks), 0,
+                                                         max(i[2] for i in inks), 1))[0] > 0],
+                       default=slide_h - far)
+        names = row
+        target = f"shape_names={names}" if len(names) > 1 else f"shape_name='{names[0]}'"
+        quoted = [f"'{n}'" for n in names]
+        which = quoted[0] if len(names) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
+        if room - _CLEARANCE >= by:
+            fix = (f"Move {which} {'down' if edge == 'top' else 'up'} by {_pt(by)} "
+                   f"(ppt_update_shape {target} dtop={_num(by if edge == 'top' else -by)}).")
+        else:
+            keep = "bottom" if edge == "top" else "top"
+            extra = f" dtop={_num(by)}" if edge == "top" else ""
+            fix = (f"Make {which} {_pt(by)} shorter, keeping {'their' if len(names) > 1 else 'its'} "
+                   f"{keep} (ppt_update_shape {target} dheight={_num(-by)}{extra}): there is no "
+                   f"room to move {'them' if len(names) > 1 else 'it'} "
+                   f"{'down' if edge == 'top' else 'up'}.")
+        findings.append(_finding(
+            slide_index, "narrow_margin", names,
+            f"{which[0].upper()}{which[1:]} {'come' if len(names) > 1 else 'comes'} within "
+            f"{_pt(distance)} of the {edge} edge of the slide, where the slide keeps "
+            f"{_pt(want)}, so {'they look' if len(names) > 1 else 'it looks'} pushed "
+            "against the edge.",
+            fix, severity="warning", edge=edge, distance_pt=round(distance, 1),
+            margin_pt=want,
+        ))
+    return findings
+
+
 # Text a template or a draft leaves for someone to replace. The words in any
 # case. "Your title" and its kind only as a line of their own, and a bracketed
 # stand-in only when it is nothing but the stand-in, so that "Grow your
@@ -3230,6 +3327,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
                         slide.get("background_gradient"), slide.get("theme_colors"))
         + _cramped_text(index, layout)
         + _narrow_margins(index, layout, slide_w)
+        + _vertical_margins(index, layout, slide_h)
         + _misaligned(index, layout, only=only)
         + _title_body_edge(index, shapes, layout)
         + _off_centre_labels(index, layout)

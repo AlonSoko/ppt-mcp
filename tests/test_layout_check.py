@@ -3133,3 +3133,37 @@ class TestContrastSuggestsTheTheme:
                                       runs=[{"color_hex": "#0B2545", "size": 14.0, "bold": False}]))
         [finding] = [f for f in slide_findings(page, W, H) if f["type"] == "low_contrast"]
         assert "#0B2545, the colour of the other text on the slide" in finding["fix"]
+
+
+class TestTopAndBottomMargins:
+    def row_at(self, bottom_gap):
+        shapes = titled_row()
+        for c in shapes[1:]:
+            c["height"] = H - bottom_gap - c["top"]
+        return shapes
+
+    def test_cards_run_almost_to_the_bottom_are_reported_as_a_row(self):
+        [found] = [f for f in check(*self.row_at(6)) if f["type"] == "narrow_margin"]
+        assert found["edge"] == "bottom" and found["distance_pt"] == 6
+        assert found["shapes"] == ["card0", "card1", "card2"]
+        # 54 pt between the title and the cards: room to move up.
+        assert found["fix"] == ("Move 'card0', 'card1' and 'card2' up by 24 pt "
+                                "(ppt_update_shape shape_names=['card0', 'card1', 'card2'] dtop=-24).")
+
+    def test_with_no_room_above_the_cards_are_shortened(self):
+        shapes = self.row_at(6)
+        for c in shapes[1:]:
+            c["top"], c["height"] = 100, H - 6 - 100
+        [found] = [f for f in check(*shapes) if f["type"] == "narrow_margin"]
+        assert "24 pt shorter, keeping their top" in found["fix"]
+        assert "dheight=-24" in found["fix"]
+
+    def test_cards_that_keep_room_are_not(self):
+        assert [f for f in check(*self.row_at(40)) if f["type"] == "narrow_margin"] == []
+
+    def test_a_bleed_off_the_bottom_is_not(self):
+        assert [f for f in check(*self.row_at(0)) if f["type"] == "narrow_margin"] == []
+
+    def test_a_footnote_set_low_is_placed_there(self):
+        shapes = titled_row() + [textbox("note", 40, H - 22, 400, 18, z=9, text_height=14)]
+        assert [f for f in check(*shapes) if f["type"] == "narrow_margin"] == []
