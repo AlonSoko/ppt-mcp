@@ -3264,3 +3264,62 @@ def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
     [rule] = found["graphics"]
     assert (rule["name"], rule["top"], rule["height"]) == ("Rule", 100.0, 1.5)
     assert rule["fill"]["color_hex"] == "#C0504D"
+
+
+class TestInsideGroups:
+    def grouped(self, *children, under=()):
+        group = shape("Group 4", 100, 100, 400, 200, z=2, type=6)   # msoGroup
+        page = slide(*under, group)
+        for order, child in enumerate(children, start=1):
+            child["name"] = "Group 4/" + child["name"]
+            child["in_group"] = "Group 4"
+            child["z"] = 2 + order / 1000
+        page["inner"] = list(children)
+        return page
+
+    def test_stand_in_words_inside_a_group_are_reported_by_their_path(self):
+        words = textbox("TextBox 2", 110, 110, 300, 40)
+        words["text"]["content"] = "Lorem ipsum dolor"
+        [finding] = slide_findings(self.grouped(words), W, H)
+        assert finding["type"] == "sample_text" and finding["shapes"] == ["Group 4/TextBox 2"]
+
+    def test_text_spilling_out_of_its_box_inside_a_group(self):
+        words = textbox("TextBox 2", 110, 110, 300, 40, text_height=80)
+        [finding] = slide_findings(self.grouped(words), W, H)
+        assert finding["type"] == "overflow"
+
+    def test_white_words_on_a_dark_card_in_the_group_read(self):
+        dark = card("Card", 100, 100, 400, 200, colour="#1F2937")
+        words = textbox("TextBox 2", 110, 110, 300, 40,
+                        runs=[{"color_hex": "#FFFFFF", "size": 14.0, "bold": False}])
+        assert slide_findings(self.grouped(dark, words), W, H) == []
+
+    def test_white_words_in_a_group_on_a_dark_slide_card_read(self):
+        dark = card("Backing", 90, 90, 420, 220, z=1, colour="#1F2937")
+        words = textbox("TextBox 2", 110, 110, 300, 40,
+                        runs=[{"color_hex": "#FFFFFF", "size": 14.0, "bold": False}])
+        found = [f for f in slide_findings(self.grouped(words, under=(dark,)), W, H)
+                 if f["type"] == "low_contrast"]
+        assert found == []
+
+    def test_white_words_in_a_group_on_white_do_not(self):
+        words = textbox("TextBox 2", 110, 110, 300, 40,
+                        runs=[{"color_hex": "#FFFFFF", "size": 14.0, "bold": False}])
+        [finding] = slide_findings(self.grouped(words), W, H)
+        assert finding["type"] == "low_contrast" and finding["shapes"][0] == "Group 4/TextBox 2"
+
+
+def test_the_text_inside_a_group_is_read_from_the_file(tmp_path):
+    from utils.package import group_texts
+
+    group = ('<p:grpSp><p:nvGrpSpPr><p:cNvPr id="4" name="Group 4"/></p:nvGrpSpPr><p:grpSpPr/>'
+             '<p:sp><p:nvSpPr><p:cNvPr id="5" name="TextBox 2"/></p:nvSpPr><p:spPr/>'
+             '<p:txBody><a:p><a:pPr rtl="1"/><a:r><a:rPr sz="2000"><a:latin typeface="David"/>'
+             '<a:cs typeface="Arial"/></a:rPr><a:t>1516 עד 1917</a:t></a:r></a:p></p:txBody></p:sp>'
+             '</p:grpSp>')
+    path = deck_file(tmp_path, [group], {})
+    [inner] = group_texts(path, [1])[1]
+    assert inner["name"] == "Group 4/TextBox 2" and inner["in_group"] == "Group 4"
+    text = inner["text"]
+    assert text["content"] == "1516 עד 1917" and text["directions"] == ["rtl"]
+    assert text["runs"][0]["font"] == "David" and text["script_font"] == "Arial"

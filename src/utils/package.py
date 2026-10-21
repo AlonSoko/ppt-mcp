@@ -361,3 +361,87 @@ def layout_facts(path, slide_indices):
             found[index] = {"graphics": graphics, "title": title,
                             "shows_master": root.get("showMasterSp", "1") not in ("0", "false")}
     return found
+
+
+# ---------------------------------------------------------------------------
+# What is inside groups
+# ---------------------------------------------------------------------------
+def _text_facts(body):
+    """The text facts the content checks read, from a shape's text body."""
+    paragraphs, runs, directions, scripts = [], set(), [], set()
+    for paragraph in body.findall("a:p", _NS):
+        props = paragraph.find("a:pPr", _NS)
+        directions.append("rtl" if props is not None and props.get("rtl") in ("1", "true")
+                          else "ltr")
+        words = []
+        for run in paragraph.findall("a:r", _NS):
+            text = run.findtext("a:t", default="", namespaces=_NS)
+            words.append(text)
+            rpr = run.find("a:rPr", _NS)
+            if not text.strip() or rpr is None:
+                continue
+            latin = rpr.find("a:latin", _NS)
+            cs = rpr.find("a:cs", _NS)
+            size = rpr.get("sz")
+            runs.add((latin.get("typeface") if latin is not None else None,
+                      int(size) / 100 if size else None, rpr.get("b") in ("1", "true")))
+            if cs is not None:
+                scripts.add(cs.get("typeface"))
+        paragraphs.append("".join(words))
+    content = "\r".join(paragraphs)
+    return {
+        "chars": len(content.strip()), "content": content,
+        "left": None, "top": None, "width": None, "height": None, "alignment": None,
+        "runs": [{"color_hex": None, "size": size, "bold": bold, "font": font, "theme": None}
+                 for font, size, bold in sorted(runs, key=lambda r: (r[0] or "", r[1] or 0))],
+        "margins": None, "word_wrap": None, "autofit": None, "orientation": None,
+        "vertical_anchor": None, "directions": directions,
+        "script_font": next(iter(scripts)) if len(scripts) == 1 else None,
+        # Set through the tools only on Windows.
+        "script_font_settable": False,
+    }
+
+
+def group_texts(path, slide_indices):
+    """The text of every shape inside a group, ``{slide: [facts]}``.
+
+    Each is named by the path the tools take, "Group 4/TextBox 2", and
+    carries what its words and fonts are, for the checks that need no more:
+    where PowerPoint draws them is not in the file.
+    """
+    found = {}
+    with zipfile.ZipFile(path) as archive:
+        for index, slide, _ in _slides(archive, slide_indices):
+            inner = []
+
+            def walk(group, prefix, owner):
+                for element in group:
+                    tag = element.tag.rsplit("}", 1)[-1]
+                    nv = next((c for c in element if c.tag.rsplit("}", 1)[-1].startswith("nv")), None)
+                    props = nv.find("p:cNvPr", _NS) if nv is not None else None
+                    if props is None:
+                        continue
+                    name = prefix + props.get("name", "")
+                    if tag == "grpSp":
+                        walk(element, name + "/", owner)
+                        continue
+                    body = element.find("p:txBody", _NS)
+                    if tag != "sp" or body is None:
+                        continue
+                    inner.append({
+                        "name": name, "z": 0, "type": _AUTOSHAPE,
+                        "left": 0.0, "top": 0.0, "width": 0.0, "height": 0.0,
+                        "rotation": 0.0, "visible": True, "connector": False,
+                        "placeholder_type": None, "fill": None, "line_visible": None,
+                        "text": _text_facts(body), "in_group": owner,
+                        # Read from the file because the tools cannot reach it.
+                        "reachable": False,
+                    })
+
+            tree = slide.find("p:cSld/p:spTree", _NS)
+            for group in tree.findall("p:grpSp", _NS) if tree is not None else []:
+                props = group.find("p:nvGrpSpPr/p:cNvPr", _NS)
+                if props is not None:
+                    walk(group, props.get("name", "") + "/", props.get("name", ""))
+            found[index] = inner
+    return found

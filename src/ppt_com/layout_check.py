@@ -3357,8 +3357,12 @@ def _fonts(slide_index, shapes):
                 f"The {script} in '{name}' is drawn in '{drawn}', not '{asked}': "
                 f"PowerPoint draws right-to-left letters in a font of their own, "
                 f"and only the Latin one was set to '{asked}'.",
-                f"Set the font again (ppt_format_text font_name='{asked}'), which "
-                "sets it for right-to-left letters too.",
+                (f"Set the font again (ppt_format_text font_name='{asked}'), which "
+                 "sets it for right-to-left letters too."
+                 if text.get("script_font_settable", True) else
+                 f"Set the right-to-left font to '{asked}' in PowerPoint's Font dialog: "
+                 "PowerPoint for Mac does not let it be set through its scripting, and "
+                 "PowerPoint for Windows sets it with ppt_format_text font_name."),
                 severity="warning", fonts=[asked],
             ))
     return findings
@@ -3419,6 +3423,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
     )
+    findings += _inside_groups(index, slide, slide_w, slide_h, trust_template)
     if only is not None:
         # Text on a touched card is drawn on its fill, so whether it can still
         # be read is that write's to report as well: a card filled dark under
@@ -3446,6 +3451,46 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
                 if not (f["type"] == "narrow_margin" and f["shapes"][0] in spaced)]
     findings += spacing + _empty_placeholders(index, shapes)
     return _sorted(findings)
+
+
+def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
+    """The checks on a shape's own text, for the shapes inside groups.
+
+    A group is laid out as one box; what is inside it is placed by whoever
+    drew it. Its text is still text: it can spill out of its box, be left as
+    stand-in words, read backwards or be set in a font that is not there. Its
+    colour is judged against what is under it inside the group, or the slide.
+    """
+    inner = _settled(slide.get("inner") or [])
+    if not inner:
+        return []
+    layout = _layout(inner, slide_w, slide_h)
+    # What is under a group shows through it, so the slide's own shapes are
+    # backdrops too; only the findings on what is inside are this check's.
+    names = {s["name"] for s in inner}
+    around = [s for s in _settled(slide["shapes"]) if s.get("type") not in (msoGroup, msoSmartArt)]
+    contrast = [f for f in _low_contrast(
+                    index, around + inner, slide.get("background_hex"), slide.get("template") or (),
+                    slide.get("follows_background"), _layout(around + inner, slide_w, slide_h),
+                    trust_template, slide.get("background_gradient"), slide.get("theme_colors"))
+                if f["shapes"][0] in names]
+    findings = (_overflow(index, inner, layout)
+                + contrast
+                + _sample_text(index, inner)
+                + _number_order(index, inner)
+                + _text_direction(index, inner)
+                + _fonts(index, inner))
+    unreachable = {s["name"]: s for s in inner if s.get("reachable") is False}
+    for finding in findings:
+        member = unreachable.get(finding["shapes"][0])
+        if member is None:
+            continue
+        group, own = member["in_group"], member["name"].rsplit("/", 1)[-1]
+        finding["fix"] = (f"Ungroup '{group}' first (ppt_ungroup_shapes shape_name_or_index="
+                          f"'{group}'): PowerPoint for Mac does not reach inside a group. "
+                          f"Then, with '{own}' as the shape: "
+                          + finding["fix"].replace(member["name"], own))
+    return findings
 
 
 def _settled(shapes):
@@ -4533,6 +4578,59 @@ def _template_area(slide, graphics, cache=None):
     return area
 
 
+def _members_of(shape):
+    """The shapes inside a group or a SmartArt graphic, with their paths."""
+    from ppt_com.shape_lookup import PATH_SEPARATOR, walk_group_children
+
+    prefix = shape.Name + PATH_SEPARATOR
+    if shape.Type == msoGroup:
+        yield from walk_group_children(shape, prefix)
+        return
+    try:
+        items = shape.GroupItems
+        count = items.Count
+    except Exception:
+        return
+    for i in range(1, count + 1):
+        try:
+            child = items(i)
+            yield child, prefix + child.Name
+        except Exception:
+            continue
+
+
+def _inner_facts(shapes, refs):
+    """The shapes inside the slide's groups and SmartArt graphics, read in full
+    and named by the path the tools take: "Group 4/TextBox 2".
+
+    The checks judge a group by its box; what is inside it has text that can
+    still spill, read wrong or be left as stand-in words.
+    """
+    inner = []
+    for facts, ref in zip(shapes, refs, strict=True):
+        if facts["type"] not in (msoGroup, msoSmartArt):
+            continue
+        try:
+            members = list(_members_of(ref))
+        except Exception:
+            logger.debug("Cannot read inside '%s'", facts["name"], exc_info=True)
+            continue
+        for order, (child, path) in enumerate(members, start=1):
+            try:
+                # Drawn in order over whatever is under the group.
+                child_facts = _geometry_facts(child, facts["z"] + order / 1000)
+                _read_appearance(child_facts, child, True)
+            except Exception:
+                logger.debug("Cannot read '%s'", path, exc_info=True)
+                continue
+            if child_facts["type"] in (msoGroup, msoSmartArt):
+                continue
+            child_facts["name"] = path
+            child_facts["in_group"] = facts["name"]
+            inner.append(child_facts)
+    return inner
+
+
 def _layout_title(slide, cache=None):
     """Where the slide's layout puts its title, as a box, or None."""
     key = None
@@ -4624,6 +4722,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "template_area": _template_area(slide, template, template_cache),
             "layout_title": _layout_title(slide, template_cache) if detail is None else None,
             "shapes": shapes,
+            "inner": _inner_facts(shapes, refs) if detail is None else [],
         })
     return facts
 
@@ -4693,14 +4792,15 @@ def _with_fonts(slides, installed):
 
     ``installed`` is called for the list only when some text names a font.
     """
-    if not any(run.get("font") for slide in slides for shape in slide["shapes"]
+    if not any(run.get("font") for slide in slides
+               for shape in slide["shapes"] + (slide.get("inner") or [])
                for run in (shape.get("text") or {}).get("runs") or []):
         return
     installed = installed()
     if not installed:
         return
     for slide in slides:
-        for shape in slide["shapes"]:
+        for shape in slide["shapes"] + (slide.get("inner") or []):
             text = shape.get("text") or {}
             asked = {run.get("font") for run in text.get("runs") or [] if run.get("font")}
             missing = sorted(f for f in asked

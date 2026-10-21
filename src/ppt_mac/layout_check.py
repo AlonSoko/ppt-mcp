@@ -482,6 +482,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             slide, None if shows is None else bool(shows), template_cache,
             None if detail is None else [s for s in shapes if s["name"] in detail])
         drawn = _saved_layout(pres, slide_index, template_cache) if detail is None else None
+        inner = _saved_groups(slide_index, template_cache) if detail is None else []
         if drawn and shows is not False:
             from ppt_com.layout_check import _TEMPLATE_Z
 
@@ -497,6 +498,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         facts["slides"].append({
             "slide_index": slide_index,
             "layout_title": (drawn or {}).get("title"),
+            "inner": inner,
             "design": design,
             "layout": _layout_name(own.get(k.layout)),
             "background_hex": background_hex,
@@ -623,3 +625,25 @@ def _saved_layout(pres, slide_index, cache):
     except Exception:
         logger.debug("Cannot read the layouts from %s", path, exc_info=True)
         return None
+
+
+def _saved_groups(slide_index, cache):
+    """The text inside the slide's groups, from the deck's own file.
+
+    A group answers no members over Apple Events, so what is inside it is
+    read from the saved file, while it holds what is on screen: its words,
+    fonts and paragraph directions, enough for the checks on those. Where
+    PowerPoint draws them is not in the file, so whether they fit is not
+    known here. ``_saved_layout`` has already decided whether the file can
+    be used.
+    """
+    from utils.package import group_texts
+
+    path = cache.get("saved file")
+    if not path:
+        return []
+    try:
+        return group_texts(path, [slide_index]).get(slide_index, [])
+    except Exception:
+        logger.debug("Cannot read the groups from %s", path, exc_info=True)
+        return []
