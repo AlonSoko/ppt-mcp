@@ -2814,3 +2814,59 @@ def test_a_locked_stretched_picture_is_unlocked_first():
     photo["lock_aspect"] = True
     [finding] = check(photo)
     assert finding["fix"].startswith("Unlock its proportions first (ppt_lock_aspect_ratio locked=false), then make it")
+
+
+# ---------------------------------------------------------------------------
+# Body text sizes across the deck
+# ---------------------------------------------------------------------------
+def body_slide(index, size, chars=120, autofit="none"):
+    title = textbox(f"Title {index}", 40, 30, 880, 60, runs=[
+        {"color_hex": "#111111", "size": 32.0, "bold": True}])
+    body = textbox(f"Body {index}", 40, 120, 880, 300, z=2, chars=chars, autofit=autofit,
+                   runs=[{"color_hex": "#333333", "size": size, "bold": False}])
+    body["text"]["content"] = "Our first point, said plainly.\rAnd the second one, said as plainly."
+    return slide(title, body, index=index)
+
+
+class TestBodyTextSizes:
+    def test_a_slide_whose_copy_was_shrunk_to_fit_is_reported(self):
+        slides = [body_slide(2, 18.0), body_slide(3, 18.0), body_slide(4, 14.0), body_slide(5, 18.0)]
+        [finding] = deck_findings(slides, H, W)
+        assert finding["type"] == "inconsistent_body_text"
+        assert finding["slides"] == [4] and finding["shapes"] == ["Body 4"]
+        assert finding["message"] == "Body text differs in size between slides: 18 pt on slides 2, 3, 5; 14 pt on slide 4."
+        assert "ppt_format_text font_size=18" in finding["fix"] and "split the slide" in finding["fix"]
+
+    def test_text_set_far_larger_is_another_kind_of_text(self):
+        slides = [body_slide(2, 18.0), body_slide(3, 18.0), body_slide(4, 32.0)]
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_point_apart_is_the_same_size(self):
+        slides = [body_slide(2, 18.0), body_slide(3, 18.0), body_slide(4, 17.0)]
+        assert deck_findings(slides, H, W) == []
+
+    def test_text_powerpoint_shrinks_to_fit_is_left_to_it(self):
+        slides = [body_slide(2, 18.0), body_slide(3, 18.0), body_slide(4, 14.0, autofit="shrink_to_fit")]
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_label_is_not_body_text(self):
+        slides = [body_slide(2, 18.0), body_slide(3, 18.0), body_slide(4, 14.0, chars=12)]
+        assert deck_findings(slides, H, W) == []
+
+    def test_a_body_placeholder_is_held_to_its_own_layout(self):
+        def placeholder_slide(index, size, layout):
+            page = body_slide(index, size)
+            page["shapes"][1]["placeholder_type"] = 2   # ppPlaceholderBody
+            page["shapes"][1]["type"] = msoPlaceholder
+            page["layout"] = layout
+            return page
+        slides = [placeholder_slide(2, 20.0, "Text"), placeholder_slide(3, 20.0, "Text"),
+                  placeholder_slide(4, 16.0, "Text"), placeholder_slide(5, 24.0, "Comparison")]
+        [finding] = deck_findings(slides, H, W)
+        assert finding["slides"] == [4]
+
+    def test_none_of_the_recorded_decks_is_reported(self):
+        for path in sorted(FIXTURES.glob("*.json")):
+            deck = json.loads(path.read_text(encoding="utf-8"))
+            found = layout_check._body_sizes(deck["slides"], deck["slide_width"], deck["slide_height"])
+            assert found == [], path.name

@@ -220,6 +220,7 @@ _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_spacing", "uneven_sizes",
     "number_order", "text_direction", "empty_placeholder", "sample_text", "inconsistent_titles",
+    "inconsistent_body_text",
 )
 
 
@@ -3133,7 +3134,7 @@ def _slides(numbers):
     return ("slide " if len(numbers) == 1 else "slides ") + ", ".join(str(n) for n in numbers)
 
 
-def deck_findings(slides, slide_h, slide_w=None):
+def _title_findings(slides, slide_h, slide_w=None):
     """Titles that differ between slides.
 
     Flipping from one slide to the next, a title that is a size larger, a few
@@ -3285,6 +3286,106 @@ def deck_findings(slides, slide_h, slide_w=None):
             "colour", entries, lambda value: f"to {value}",
             lambda value: f"color='{value}'", held,
         )
+    return findings
+
+
+def deck_findings(slides, slide_h, slide_w=None):
+    """What differs between slides that should not: titles and body text."""
+    return _title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
+
+
+# A text box is a slide's copy, rather than a label, a card's words or a
+# source line, when it has at least this many characters in two paragraphs or
+# more, across at least this share of the slide's width.
+_BODY_CHARS = 80
+_BODY_WIDTH = 0.6
+
+# Body text this far from the usual size, and no further, was made smaller or
+# larger to fit: further is a different kind of text, a quote set large or a
+# dense appendix.
+_BODY_SIZE_TOLERANCE = 1.0
+_BODY_SIZE_SLIP = 6.0
+
+_BODY_PLACEHOLDERS = frozenset({ppPlaceholderBody, ppPlaceholderObject})
+
+
+def _body_text(slide, slide_w, slide_h):
+    """The shape that carries a slide's copy, its size, and what it is
+    compared with: its layout for a body placeholder, the deck's other
+    copy for a text box. None when the slide has no copy that is clearly
+    that, in one size.
+    """
+    title = find_title(slide, slide_h)
+    if title is None:
+        return None
+    best = None
+    for shape in slide["shapes"]:
+        text = shape.get("text") or {}
+        if (shape is title or not shape.get("visible", True)
+                or text.get("autofit") == "shrink_to_fit"):
+            continue
+        placeholder = shape.get("placeholder_type")
+        if placeholder in _BODY_PLACEHOLDERS:
+            kind = ("layout", slide.get("design"), slide.get("layout"))
+        elif placeholder is None and shape.get("type") == msoTextBox:
+            paragraphs = [p for p in _paragraphs(text.get("content") or "") if p.strip()]
+            if ((text.get("chars") or 0) < _BODY_CHARS or len(paragraphs) < 2
+                    or not slide_w or shape["width"] < _BODY_WIDTH * slide_w):
+                continue
+            kind = ("copy",)
+        else:
+            continue
+        sizes = {run.get("size") for run in text.get("runs") or [] if run.get("size")}
+        if len(sizes) != 1:
+            continue
+        if best is None or text["chars"] > best[0]["text"]["chars"]:
+            best = (shape, sizes.pop(), kind)
+    return best
+
+
+def _body_sizes(slides, slide_w, slide_h):
+    """Body text a size or two off the rest of the deck's.
+
+    A slide that held too much had its text made smaller to fit, and flipping
+    from one slide to the next the text jumps in size. Only like is compared
+    with like: a body placeholder with those on the same layout, which gives
+    them all one size, and a slide's main copy in a text box with the others.
+    """
+    by_kind = {}
+    for slide in slides:
+        found = _body_text(slide, slide_w, slide_h)
+        if found:
+            shape, size, kind = found
+            by_kind.setdefault(kind, {})[slide["slide_index"]] = (shape, size)
+    findings = []
+    for bodies in by_kind.values():
+        if len(bodies) < _MIN_TITLED_SLIDES:
+            continue
+        usual, rest = _usual_group([(i, size) for i, (_, size) in bodies.items()],
+                                   _BODY_SIZE_TOLERANCE)
+        if len(usual) < 2:
+            continue
+        usual_size = sorted(v for _, v in usual)[len(usual) // 2]
+        odd = [(i, v) for i, v in rest if abs(v - usual_size) <= _BODY_SIZE_SLIP]
+        if not odd:
+            continue
+        groups = [usual] + _clusters(odd, _BODY_SIZE_TOLERANCE)
+        described = "; ".join(
+            f"{round(sorted(v for _, v in g)[len(g) // 2], 1):g} pt on {_slides(i for i, _ in g)}"
+            for g in groups)
+        names = [bodies[i][0]["name"] for i, _ in odd]
+        calls = "; ".join(f"'{bodies[i][0]['name']}' on slide {i}" for i, _ in sorted(odd))
+        size = f"{round(usual_size, 1):g}"
+        smaller = any(v < usual_size for _, v in odd)
+        findings.append(_finding(
+            None, "inconsistent_body_text", names,
+            f"Body text differs in size between slides: {described}.",
+            f"Set the body text to {size} pt (ppt_format_text font_size={size}) "
+            f"on {calls}."
+            + (" Where it then no longer fits, cut the text or split the slide "
+               "rather than make it smaller." if smaller else ""),
+            severity="warning", slides=sorted(i for i, _ in odd),
+        ))
     return findings
 
 
