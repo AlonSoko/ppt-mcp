@@ -760,9 +760,11 @@ class FakeRange:
         paragraphs = self.Text.split("\r")
         if i is None:
             return SimpleNamespace(Count=len(paragraphs))
-        direction = 2 if paragraphs[i - 1].startswith("\u05d0") else 1
+        text = paragraphs[i - 1]
+        direction = 2 if text.startswith("\u05d0") else 1
+        language = 1037 if text.startswith("\u05d1") else 1033   # he-IL, en-US
         return SimpleNamespace(ParagraphFormat=SimpleNamespace(
-            Alignment=self._alignment, TextDirection=direction))
+            Alignment=self._alignment, TextDirection=direction), LanguageID=language)
 
 
 def fake_shape(name="TextBox 1", content="Hello there", runs=None, bounds=(107.2, 103.6, 150.0, 30.0)):
@@ -828,9 +830,11 @@ class TestTheWindowsReader:
         assert words["runs"] and words["margins"] == MARGINS
 
     def test_paragraph_directions_are_read_for_hebrew_text(self):
-        content = "\u05d0 1\r\u05d1 2"
+        # Set right to left; tagged as Hebrew, which PowerPoint draws from the
+        # right as well; neither.
+        content = "\u05d0 1\r\u05d1 2\r\u05d2 3"
         shape = fake_shape(content=content, runs=[(content, 0x222222, 20.0, msoFalse)])
-        assert layout_check._shape_facts(shape, 1, None)["text"]["directions"] == ["rtl", "ltr"]
+        assert layout_check._shape_facts(shape, 1, None)["text"]["directions"] == ["rtl", "rtl", "ltr"]
 
     def test_and_not_for_text_without_it(self):
         assert "directions" not in layout_check._shape_facts(fake_shape(), 1, None)["text"]
@@ -3377,3 +3381,9 @@ class TestTextOnAPhoto:
         page = self.photo_slide((200, 220, 240), (40, 40, 40))
         del page["shapes"][0]["photo"]
         assert slide_findings(page, W, H) == []
+
+
+def test_hebrew_in_the_themes_own_pair_of_fonts_is_its_design():
+    page = slide(styled("body", 30, "Calibri", content="שלום, עולם.", script_font="Arial"))
+    page["theme_fonts"] = {"latin": ["Calibri Light", "Calibri"], "script": ["Arial", "Arial"]}
+    assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []

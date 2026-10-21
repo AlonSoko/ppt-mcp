@@ -371,7 +371,11 @@ def _text_facts(body):
     paragraphs, runs, directions, scripts = [], set(), [], set()
     for paragraph in body.findall("a:p", _NS):
         props = paragraph.find("a:pPr", _NS)
-        directions.append("rtl" if props is not None and props.get("rtl") in ("1", "true")
+        first = paragraph.find("a:r/a:rPr", _NS)
+        language = (first.get("lang") or "").split("-")[0].lower() if first is not None else ""
+        # Set right to left, or in a language PowerPoint draws from the right.
+        directions.append("rtl" if (props is not None and props.get("rtl") in ("1", "true"))
+                          or language in ("he", "iw", "ar", "fa", "ur", "yi", "syr", "dv")
                           else "ltr")
         words = []
         for run in paragraph.findall("a:r", _NS):

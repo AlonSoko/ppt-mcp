@@ -3277,11 +3277,11 @@ def _text_direction(slide_index, shapes):
         lines = "a paragraph" if len(wrong) == 1 else f"{len(wrong)} paragraphs"
         findings.append(_finding(
             slide_index, "text_direction", [name],
-            f"'{name}' has {lines} of {_script(content)} set left to right, such "
-            f"as \"{sample}\". PowerPoint for Windows draws them that way: the "
-            "punctuation and numbers in them land on the wrong side. PowerPoint "
-            "for Mac goes by the first letter instead, so the slide reads right "
-            "there and wrong on Windows.",
+            f"'{name}' has {lines} of {_script(content)} set left to right and not "
+            f"tagged as {_script(content)}, such as \"{sample}\". PowerPoint for "
+            "Windows draws them left to right: the punctuation and numbers in them "
+            "land on the wrong side. PowerPoint for Mac goes by the first letter "
+            "instead, so the slide reads right there and wrong on Windows.",
             f"Set them right to left ({_direction_call(paragraphs, wrong)}).",
             paragraphs=wrong,
         ))
@@ -3396,7 +3396,7 @@ def _chart_sample_data(slide_index, shapes):
     return findings
 
 
-def _fonts(slide_index, shapes):
+def _fonts(slide_index, shapes, theme_fonts=None):
     """Text set in a font this computer does not have, or drawn in another.
 
     PowerPoint draws a font it cannot find in a stand-in, and says nothing:
@@ -3436,7 +3436,12 @@ def _fonts(slide_index, shapes):
             continue
         fonts = {run.get("font") for run in text.get("runs") or [] if run.get("font")}
         drawn = text.get("script_font")
-        if (len(fonts) == 1 and drawn and not drawn.startswith("+")
+        themed = theme_fonts or {}
+        # The theme's own pair, a Latin font and a right-to-left one, is its
+        # design: nobody asked for the Latin font by name.
+        by_theme = (fonts and fonts <= set(themed.get("latin") or ())
+                    and drawn in set(themed.get("script") or ()))
+        if (len(fonts) == 1 and drawn and not drawn.startswith("+") and not by_theme
                 and drawn.lower() != next(iter(fonts)).lower()):
             asked = next(iter(fonts))
             script = _script(text.get("content") or "") or "right-to-left"
@@ -3506,7 +3511,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _uneven_sizes(index, layout)
         + _sample_text(index, shapes)
         + _chart_sample_data(index, shapes)
-        + _fonts(index, shapes)
+        + _fonts(index, shapes, slide.get("theme_fonts"))
         + _stretched(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
@@ -3567,7 +3572,7 @@ def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
                 + _sample_text(index, inner)
                 + _number_order(index, inner)
                 + _text_direction(index, inner)
-                + _fonts(index, inner))
+                + _fonts(index, inner, slide.get("theme_fonts")))
     unreachable = {s["name"]: s for s in inner if s.get("reachable") is False}
     for finding in findings:
         member = unreachable.get(finding["shapes"][0])
@@ -4374,8 +4379,21 @@ def has_right_to_left(content) -> bool:
     return any(unicodedata.bidirectional(ch) in _RIGHT_TO_LEFT for ch in content)
 
 
+# Languages written right to left, by their primary language id: Arabic,
+# Hebrew, Urdu, Farsi, Syriac, Divehi, Yiddish's in Windows' numbering.
+_RTL_LANGUAGES = frozenset({0x01, 0x0D, 0x20, 0x29, 0x5A, 0x65, 0x3D})
+
+
 def _directions(tr):
-    """Each paragraph's direction as set, 'rtl' or 'ltr', None where unread."""
+    """Each paragraph's direction as PowerPoint draws it, 'rtl' or 'ltr',
+    None where unread.
+
+    A paragraph is drawn right to left when it is set so, and also when its
+    text is in a right-to-left language: PowerPoint tags Hebrew typed or set
+    through it as Hebrew, and draws it from the right without being told. A
+    file written by another program leaves the language out, and then only
+    the setting counts.
+    """
     try:
         count = tr.Paragraphs().Count
     except Exception:
@@ -4383,11 +4401,16 @@ def _directions(tr):
     directions = []
     for i in range(1, count + 1):
         try:
-            value = tr.Paragraphs(i).ParagraphFormat.TextDirection
+            paragraph = tr.Paragraphs(i)
+            if paragraph.ParagraphFormat.TextDirection == ppDirectionRightToLeft:
+                directions.append("rtl")
+                continue
+            language = paragraph.LanguageID
+            if language < 0:
+                language = paragraph.Runs(1).LanguageID
+            directions.append("rtl" if (language & 0x3FF) in _RTL_LANGUAGES else "ltr")
         except Exception:
-            value = None
-        directions.append({ppDirectionRightToLeft: "rtl",
-                           ppDirectionLeftToRight: "ltr"}.get(value))
+            directions.append(None)
     return directions
 
 
@@ -4719,6 +4742,38 @@ def _inner_facts(shapes, refs):
     return inner
 
 
+def _theme_fonts(slide, cache=None):
+    """The theme's heading and body fonts, Latin and right to left."""
+    key = None
+    if cache is not None:
+        try:
+            key = ("theme fonts", slide.Design.Index)
+        except Exception:
+            key = None
+        if key in cache:
+            return cache[key]
+    fonts = {"latin": [], "script": []}
+    try:
+        scheme = slide.ThemeColorScheme.Parent.ThemeFontScheme
+    except Exception:
+        try:
+            scheme = slide.Design.SlideMaster.Theme.ThemeFontScheme
+        except Exception:
+            scheme = None
+    if scheme is not None:
+        for part in ("MajorFont", "MinorFont"):
+            for kind, index in (("latin", 1), ("script", 3)):   # msoThemeLatin, ComplexScript
+                try:
+                    name = getattr(scheme, part)(index).Name
+                except Exception:
+                    continue
+                if name:
+                    fonts[kind].append(name)
+    if key is not None:
+        cache[key] = fonts
+    return fonts
+
+
 def _layout_title(slide, cache=None):
     """Where the slide's layout puts its title, as a box, or None."""
     key = None
@@ -4809,6 +4864,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "template": template,
             "template_area": _template_area(slide, template, template_cache),
             "layout_title": _layout_title(slide, template_cache) if detail is None else None,
+            "theme_fonts": _theme_fonts(slide, template_cache),
             "shapes": shapes,
             "inner": _inner_facts(shapes, refs) if detail is None else [],
         })

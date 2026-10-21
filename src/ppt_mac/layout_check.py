@@ -263,11 +263,15 @@ def _text_facts(shape, full):
 def _directions(tr, content):
     """The macOS half of ppt_com.layout_check._directions, in one event.
 
-    A text of one paragraph answers its one value rather than a list.
+    A paragraph set right to left is known. One that is not may still be
+    drawn right to left, since PowerPoint draws text tagged as Hebrew or
+    Arabic from the right, and the dictionary has no way to read a text's
+    language: it is None, unknown, rather than a guess. A text of one
+    paragraph answers its one value rather than a list.
     """
     from ppt_com.layout_check import _paragraphs
 
-    names = {k.right_to_left: "rtl", k.left_to_right: "ltr"}
+    names = {k.right_to_left: "rtl"}
     try:
         values = tr.paragraphs.paragraph_format.text_direction.get()
     except Exception:
