@@ -3078,3 +3078,32 @@ class TestFontNames:
         table = struct.pack(">HHH", 0, len(entries), 6 + 12 * len(entries)) + b"".join(entries) + strings
         font = struct.pack(">IHHHH", 0x00010000, 1, 0, 0, 0) + b"name" + struct.pack(">III", 0, 28, len(table)) + table
         assert font_names(font) == {"Calibri Light", "Calibri"}
+
+
+class TestTitleCapitals:
+    @staticmethod
+    def worded_title(index, words, **text_extra):
+        page = titled(index)
+        page["shapes"][0]["text"]["content"] = words
+        page["shapes"][0]["text"].update(text_extra)
+        return page
+
+    def test_a_title_typed_in_capitals_among_normal_ones_is_reported(self):
+        slides = [self.worded_title(2, "Where we stand"), self.worded_title(3, "What moved"),
+                  self.worded_title(4, "NEXT STEPS")]
+        [finding] = deck_findings(slides, H, W)
+        assert finding["message"] == ("Slide titles differ in capitals: normal on slides 2, 3; "
+                                      "capitals on slide 4.")
+        assert finding["fix"] == ("Set the titles on slide 4 in normal case (ppt_set_text "
+                                  "with the title retyped in normal case).")
+
+    def test_capitals_the_template_sets_are_its_style(self):
+        slides = [self.worded_title(2, "Where we stand", all_caps=True),
+                  self.worded_title(3, "What moved", all_caps=True),
+                  self.worded_title(4, "NEXT STEPS")]
+        assert deck_findings(slides, H, W) == []
+
+    def test_hebrew_has_no_capitals(self):
+        slides = [self.worded_title(2, "איפה אנחנו"), self.worded_title(3, "מה השתנה"),
+                  self.worded_title(4, "NEXT STEPS")]
+        assert deck_findings(slides, H, W) == []

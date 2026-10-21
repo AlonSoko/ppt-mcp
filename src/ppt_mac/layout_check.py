@@ -253,6 +253,8 @@ def _text_facts(shape, full):
             pass
     if full:
         facts["runs"] = _run_styles(tr)
+        caps = _value(_record(tr.font).get(k.caps_type))
+        facts["all_caps"] = {k.all_caps: True, k.no_caps: False}.get(caps)
         if has_right_to_left(content):
             facts["directions"] = _directions(tr, content)
     return facts

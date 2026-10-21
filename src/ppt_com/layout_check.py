@@ -3474,6 +3474,16 @@ def _title_findings(slides, slide_h, slide_w=None):
         lambda value: f"to {value} alignment",
         lambda value: f"alignment='{value}'", held, tool="ppt_set_paragraph_format",
     )
+    # Capitals the template sets by formatting are its style, and the words
+    # under them are typed as they please, so only typed capitals are held.
+    if not any((title.get("text") or {}).get("all_caps") for _, title in titled):
+        findings += _title_differences(
+            "capitals", [(index, title, _title_case(title)) for index, title in titled],
+            lambda value: "in capitals" if value == "capitals" else "in normal case",
+            lambda value: "with the title retyped " + (
+                "in capitals" if value == "capitals" else "in normal case"),
+            held, tool="ppt_set_text",
+        )
     findings += _title_differences(
         "weight", [(index, title, _title_weight(title)) for index, title in titled],
         lambda value: f"in {value}" if value == "bold" else "in regular weight",
@@ -3674,6 +3684,17 @@ def _title_edge(title, field):
     box = text_box(title) or shape_box(title)
     return {"left": box[0], "top": box[1], "right": box[2],
             "center": (box[0] + box[2]) / 2}[field]
+
+
+def _title_case(title):
+    """'capitals' for a title typed all in capitals, 'normal' for one with
+    small letters, None for one with too few letters to tell, or none with
+    a case at all, Hebrew or Arabic."""
+    letters = [ch for ch in (title.get("text") or {}).get("content") or "" if ch.isalpha()]
+    cased = [ch for ch in letters if ch.isupper() or ch.islower()]
+    if len(cased) < 4:
+        return None
+    return "capitals" if all(ch.isupper() for ch in cased) else "normal"
 
 
 def _title_weight(title):
@@ -3950,6 +3971,11 @@ def _text_facts(shape, full):
         {"color_hex": colour, "size": size, "bold": bold, "font": name, "theme": theme}
         for colour, size, bold, name, theme in sorted(styles, key=lambda s: (s[0] or "", s[1] or 0))
     ]
+    try:
+        caps = shape.TextFrame2.TextRange.Font.Allcaps
+        facts["all_caps"] = {msoTrue: True, 0: False}.get(caps)
+    except Exception:
+        pass
     if has_right_to_left(content):
         facts["directions"] = _directions(tr)
         try:
