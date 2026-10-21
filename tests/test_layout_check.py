@@ -3387,3 +3387,11 @@ def test_hebrew_in_the_themes_own_pair_of_fonts_is_its_design():
     page = slide(styled("body", 30, "Calibri", content="שלום, עולם.", script_font="Arial"))
     page["theme_fonts"] = {"latin": ["Calibri Light", "Calibri"], "script": ["Arial", "Arial"]}
     assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []
+
+
+def test_a_theme_naming_no_right_to_left_font_leaves_it_to_powerpoint():
+    # Live on Windows: the Office theme's complex script fonts are empty, and
+    # Hebrew in a text box with no font asked for drew in Arial.
+    page = slide(styled("body", 30, "Calibri", content="שלום, עולם.", script_font="Arial"))
+    page["theme_fonts"] = {"latin": ["Calibri Light", "Calibri"], "script": []}
+    assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []

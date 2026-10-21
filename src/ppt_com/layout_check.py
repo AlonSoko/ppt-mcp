@@ -3439,8 +3439,10 @@ def _fonts(slide_index, shapes, theme_fonts=None):
         themed = theme_fonts or {}
         # The theme's own pair, a Latin font and a right-to-left one, is its
         # design: nobody asked for the Latin font by name.
+        # A theme that names no right-to-left font leaves it to PowerPoint's
+        # default for the script, which is then the theme's choice as well.
         by_theme = (fonts and fonts <= set(themed.get("latin") or ())
-                    and drawn in set(themed.get("script") or ()))
+                    and (drawn in set(themed.get("script") or ()) or not themed.get("script")))
         if (len(fonts) == 1 and drawn and not drawn.startswith("+") and not by_theme
                 and drawn.lower() != next(iter(fonts)).lower()):
             asked = next(iter(fonts))
@@ -4754,12 +4756,9 @@ def _theme_fonts(slide, cache=None):
             return cache[key]
     fonts = {"latin": [], "script": []}
     try:
-        scheme = slide.ThemeColorScheme.Parent.ThemeFontScheme
+        scheme = slide.Design.SlideMaster.Theme.ThemeFontScheme
     except Exception:
-        try:
-            scheme = slide.Design.SlideMaster.Theme.ThemeFontScheme
-        except Exception:
-            scheme = None
+        scheme = None
     if scheme is not None:
         for part in ("MajorFont", "MinorFont"):
             for kind, index in (("latin", 1), ("script", 3)):   # msoThemeLatin, ComplexScript
