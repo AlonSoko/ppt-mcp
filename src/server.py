@@ -130,6 +130,20 @@ take works. Drop the named argument and call again.
 # substitutes one, so a deck built from the Windows recommendation on a Mac
 # comes out in something nobody chose. The advice therefore has to be right
 # the first time it is read, rather than corrected further down (#194).
+from ppt_com.layout_check import CHECK_EACH_WRITE
+
+# Step 7 of the instructions, which PPT_LAYOUT_CHECKS changes.
+_WRITE_CHECKS = (
+    "The tools that add, copy, move, resize or retext a shape, or fill a placeholder, "
+    "check what they touched and report any problem in their result under "
+    "`layout_issues`, each with a `fix` naming the call and its values: act on them "
+    "before moving on."
+    if CHECK_EACH_WRITE else
+    "This server's write tools do not check what they touched (PPT_LAYOUT_CHECKS=off), "
+    "so run `ppt_check_layout` on a slide after each few changes to it, and act on "
+    "each issue's `fix` before moving on."
+)
+
 _PREFERRED_FONTS = (
     "Preferred fonts: Hiragino Sans (Japanese, ヒラギノ角ゴシック in the font "
     "menu) with Hiragino Sans W6 for headings, and Helvetica Neue or Arial "
@@ -287,8 +301,8 @@ mcp = _PowerPointServer(
 4. After placing text, set fonts explicitly with `ppt_batch_apply_formatting` or `ppt_set_default_fonts`. On Japanese-locale systems, the slide master default is often 游ゴシック, which renders thin and illegible when projected. """ + _PREFERRED_FONTS + """
 5. For visual symbols, `ppt_search_icons` + `ppt_add_svg_icon` produce crisper, scalable results than emoji characters and are generally preferred in presentations.
 6. Use `ppt_get_slide_preview` to visually inspect slides as you work.
-7. The tools that add, copy, move, resize or retext a shape, or fill a placeholder, check what they touched and report any problem in their result under `layout_issues`, each with a `fix` naming the call and its values: act on them before moving on. When a slide is finished, run `ppt_check_layout` on it, and before calling the deck done, run it once more with no `slide_index`, which also compares the titles across slides. A slide is done when it reports no issues. The check measures rather than looks, so it works with or without image input.
-8. Build a slide at a time, not the whole deck at once. Before the first shape, fix the grid (margins, column positions, a type scale and a palette) and keep every shape on it: most alignment issues are coordinates a few points apart. Decide on photos up front, since adding them later changes the layout. Finish each slide, with its `layout_issues` acted on, `ppt_check_layout` clean and a preview checked if you can see images, before starting the next. Fix problems in place with the call each `fix` names. Deleting and rebuilding a slide or the deck to move something a few points costs many calls and finds the same problems again.
+7. """ + _WRITE_CHECKS + """ When a slide is finished, run `ppt_check_layout` on it, and before calling the deck done, run it once more with no `slide_index`, which also compares the titles across slides. A slide is done when it reports no issues. The check measures rather than looks, so it works with or without image input.
+8. Build a slide at a time, not the whole deck at once. Before the first shape, fix the grid (margins, column positions, a type scale and a palette) and keep every shape on it: most alignment issues are coordinates a few points apart. Decide on photos up front, since adding them later changes the layout. Finish each slide, with its issues acted on, `ppt_check_layout` clean and a preview checked if you can see images, before starting the next. Fix problems in place with the call each `fix` names. Deleting and rebuilding a slide or the deck to move something a few points costs many calls and finds the same problems again.
 
 ## Key tools
 

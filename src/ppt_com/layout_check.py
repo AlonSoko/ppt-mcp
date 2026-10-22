@@ -11,7 +11,9 @@ This module answers those questions in two places. ``ppt_check_layout`` checks
 one slide or the whole deck on request. The tools that create, move, resize or
 retext a shape run the per-shape checks on the shape they just touched and put
 what they find in their own result, so a problem is reported by the call that
-caused it, while the caller still knows why it made that call.
+caused it, while the caller still knows why it made that call. Setting
+``PPT_LAYOUT_CHECKS=off`` turns the second off, for a write-heavy session that
+would rather pay for the check once a slide is done.
 
 The arithmetic is kept apart from the reading, so it can be tested without
 PowerPoint and so both platforms answer the same way. ``_slide_facts_impl``
@@ -21,6 +23,7 @@ reads a slide into plain dicts; everything after that is pure.
 import json
 import logging
 import math
+import os
 import re
 from itertools import pairwise
 from typing import Optional
@@ -42,6 +45,23 @@ from ppt_com.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _check_each_write(value):
+    """Whether the write tools check what they touched, from PPT_LAYOUT_CHECKS."""
+    value = value.strip().lower()
+    if value in ("on", "true", "1", "yes", ""):
+        return True
+    if value in ("off", "false", "0", "no"):
+        return False
+    raise ValueError(
+        f"PPT_LAYOUT_CHECKS={value!r} is not a setting; use 'on' (the default), "
+        "or 'off' to leave the checks to ppt_check_layout")
+
+
+# Each check reads the slide back, which costs a call per write, and on the Mac
+# several. ppt_check_layout runs either way.
+CHECK_EACH_WRITE = _check_each_write(os.getenv("PPT_LAYOUT_CHECKS", "on"))
 
 
 # ---------------------------------------------------------------------------
@@ -3646,6 +3666,8 @@ def report_layouts(result: dict, touched) -> dict:
 
     ``touched`` maps each slide index to the shapes touched on it.
     """
+    if not CHECK_EACH_WRITE:
+        return result
     touched = {index: [s for s in shapes if s not in (None, "")]
                for index, shapes in (touched or {}).items()}
     touched = {index: shapes for index, shapes in touched.items() if shapes}
@@ -3692,8 +3714,11 @@ def deck_snapshot(trust_template=True):
     None when it cannot be read, and then the change reports nothing rather
     than blaming itself for problems that were already there. A change to the
     theme's colours is the caller's choice, not the template's, so it is read
-    without ``trust_template``; see ``_as_designed``.
+    without ``trust_template``; see ``_as_designed``. None too while
+    ``CHECK_EACH_WRITE`` is off, without reading anything.
     """
+    if not CHECK_EACH_WRITE:
+        return None
     try:
         return {_issue_key(f) for f in _deck_findings_now(trust_template)}
     except Exception:  # noqa: BLE001 - the change itself still goes ahead
@@ -3729,7 +3754,8 @@ def report_contrast(result: dict, slide_indices) -> dict:
     A new background touches no shape, but every line of text on the slide is
     now drawn on it, so only the contrast check is run, over the whole slide.
     """
-    if not isinstance(result, dict) or "error" in result or not slide_indices:
+    if (not CHECK_EACH_WRITE or not isinstance(result, dict) or "error" in result
+            or not slide_indices):
         return result
     issues = []
     try:

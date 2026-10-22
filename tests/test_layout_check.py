@@ -2401,6 +2401,59 @@ class TestAChangeToTheWholeDeck:
         assert "report_deck_change(result, before, trust_template=False)" in body
 
 
+class TestTurnedOff:
+    """PPT_LAYOUT_CHECKS=off: the writes read nothing back; ppt_check_layout still runs."""
+
+    @pytest.fixture(autouse=True)
+    def off(self, monkeypatch):
+        monkeypatch.setattr(layout_check, "CHECK_EACH_WRITE", False)
+
+    def test_a_write_reports_nothing_and_reads_nothing(self, monkeypatch):
+        fake = FakePpt(facts(card("c", 900, 100, 100, 50)))
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        assert report_layout({"shape_name": "c"}, 1, ["c"]) == {"shape_name": "c"}
+        assert fake.calls == []
+
+    def test_nor_a_new_background(self, monkeypatch):
+        fake = FakeDeck([slide(card("c", 10, 10, 50, 50), background="#333333")])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        assert layout_check.report_contrast({"success": True}, [1]) == {"success": True}
+        assert fake.calls == []
+
+    def test_nor_a_change_to_the_whole_deck(self, monkeypatch):
+        fake = FakeDeck([slide(card("c", 10, 10, 50, 50))])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        before = layout_check.deck_snapshot()
+        assert before is None
+        assert layout_check.report_deck_change({"success": True}, before) == {"success": True}
+        assert fake.calls == []
+
+    def test_the_check_on_request_still_runs(self, monkeypatch):
+        fake = FakeDeck([slide(card("c", 900, 100, 100, 50))])
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        result = json.loads(layout_check.check_layout(layout_check.CheckLayoutInput(slide_index=1)))
+        assert kinds(result["issues"]) == ["off_slide"]
+
+
+class TestTheSetting:
+    @pytest.mark.parametrize("value", ["on", "ON", "true", "1", "yes", ""])
+    def test_on(self, value):
+        assert layout_check._check_each_write(value) is True
+
+    @pytest.mark.parametrize("value", ["off", "Off", "false", "0", "no", " off "])
+    def test_off(self, value):
+        assert layout_check._check_each_write(value) is False
+
+    def test_anything_else_is_refused_by_name(self):
+        with pytest.raises(ValueError, match="PPT_LAYOUT_CHECKS='of' is not a setting; use 'on'"):
+            layout_check._check_each_write("of")
+
+    def test_the_instructions_follow_it(self):
+        source = (Path(__file__).parent.parent / "src" / "server.py").read_text(encoding="utf-8")
+        assert '7. """ + _WRITE_CHECKS + """' in source
+        assert "if CHECK_EACH_WRITE else" in source
+
+
 class TestATitleTooLongForItsBox:
     def test_growing_it_into_the_body_is_not_the_fix(self):
         # A title placeholder that PowerPoint did not shrink, its body right below.
