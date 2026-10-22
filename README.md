@@ -310,6 +310,30 @@ When PowerPoint has a modal dialog open (e.g., SmartArt layout picker, Save dial
 
 ESC cancels without committing, so there are no destructive side effects. This is particularly useful in automated workflows where no human is present to close dialogs.
 
+### Icons on a network that blocks the icon sites
+
+`ppt_search_icons` reads its icon list from `fonts.google.com`, and `ppt_add_svg_icon` downloads icons from `cdn.jsdelivr.net`. Every download, pictures by URL included, gives up after 15 seconds and says which host it could not reach. Three settings change that:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PPT_ICON_BASE_URL` | `https://cdn.jsdelivr.net/npm/@material-symbols/svg-400@0.31.3` | Where icons come from. Any address with the package's layout (`<base>/outlined/home.svg`) works: a mirror such as `https://unpkg.com/@material-symbols/svg-400@0.31.3`, or a local copy of the package as `file:///path/to/svg-400`. |
+| `PPT_ICON_METADATA_URL` | `https://fonts.google.com/metadata/icons` | Where the icon list comes from. Save that page once and point this at the copy, as `file:///path/to/icons.json`. |
+| `PPT_DOWNLOAD_TIMEOUT` | `15` | Seconds to wait for a server to answer. |
+
+```json
+{
+  "mcpServers": {
+    "powerpoint": {
+      "command": "uvx",
+      "args": ["ppt-mcp"],
+      "env": {
+        "PPT_ICON_BASE_URL": "https://unpkg.com/@material-symbols/svg-400@0.31.3"
+      }
+    }
+  }
+}
+```
+
 ## 🍎 macOS support
 
 **12 tools refuse on macOS. The rest work.** The 12 are listed by name in

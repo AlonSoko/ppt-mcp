@@ -310,6 +310,30 @@ PowerPointのモーダルダイアログ（SmartArt レイアウト選択、保�
 
 ESCは変更を確定せずにキャンセルするため、意図しない操作は発生しません。人間が操作しない自動化ワークフローで特に有用です。
 
+### アイコンのサイトがブロックされているネットワーク
+
+`ppt_search_icons` はアイコン一覧を `fonts.google.com` から読み込み、`ppt_add_svg_icon` はアイコンを `cdn.jsdelivr.net` からダウンロードします。URL からの画像も含め、すべてのダウンロードは 15 秒で打ち切られ、接続できなかったホストをエラーに示します。次の 3 つの設定で変更できます：
+
+| 設定 | 既定値 | 内容 |
+|---|---|---|
+| `PPT_ICON_BASE_URL` | `https://cdn.jsdelivr.net/npm/@material-symbols/svg-400@0.31.3` | アイコンの取得元。パッケージと同じ構成（`<base>/outlined/home.svg`）であれば使えます。`https://unpkg.com/@material-symbols/svg-400@0.31.3` のようなミラー、またはパッケージのローカルコピー（`file:///path/to/svg-400`）。 |
+| `PPT_ICON_METADATA_URL` | `https://fonts.google.com/metadata/icons` | アイコン一覧の取得元。このページを一度保存し、そのコピー（`file:///path/to/icons.json`）を指定します。 |
+| `PPT_DOWNLOAD_TIMEOUT` | `15` | サーバーの応答を待つ秒数。 |
+
+```json
+{
+  "mcpServers": {
+    "powerpoint": {
+      "command": "uvx",
+      "args": ["ppt-mcp"],
+      "env": {
+        "PPT_ICON_BASE_URL": "https://unpkg.com/@material-symbols/svg-400@0.31.3"
+      }
+    }
+  }
+}
+```
+
 ## 🍎 macOS 対応
 
 **macOS で断るツールは 12 です。残りは動きます。**その 12 は

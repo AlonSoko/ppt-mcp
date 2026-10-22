@@ -307,7 +307,7 @@ class TestStaging:
         monkeypatch.setattr(advanced_ops, "EXPORT_STAGING_DIR", str(staging))
         monkeypatch.setattr(
             advanced_ops.urllib.request, "urlopen",
-            lambda url: _FakeResponse(b"\x89PNG", "image/png"),
+            lambda url, timeout=None: _FakeResponse(b"\x89PNG", "image/png"),
         )
 
         with _fake_deck([]) as deck:
@@ -330,7 +330,7 @@ class TestStaging:
         monkeypatch.setattr(advanced_ops, "EXPORT_STAGING_DIR", str(staging))
         monkeypatch.setattr(
             advanced_ops.urllib.request, "urlopen",
-            lambda url: _FakeResponse(
+            lambda url, timeout=None: _FakeResponse(
                 b'<svg viewBox="0 0 24 24"><path fill="currentColor"/></svg>',
                 "image/svg+xml",
             ),
@@ -394,7 +394,7 @@ class TestStaging:
         monkeypatch.setattr(advanced_ops, "EXPORT_STAGING_DIR", str(tmp_path))
         monkeypatch.setattr(
             advanced_ops.urllib.request, "urlopen",
-            lambda url: _FakeResponse(b"not an image", "image/png"),
+            lambda url, timeout=None: _FakeResponse(b"not an image", "image/png"),
         )
 
         with _fake_deck([]) as deck:
