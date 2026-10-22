@@ -1692,12 +1692,17 @@ def _template_move(a, a_ink, union, named, shapes, graphics, layout):
         if by > 0:
             options = sorted((left - a["left"], f", {label}") for left, _, label in lines
                              if left - a["left"] >= by - _EDGE_TOLERANCE)
+            if _reads_right_to_left(shapes):
+                # A right-to-left slide keeps its right edges; the left
+                # ones are wherever its lines happen to end.
+                options = sorted((right - right_edge, f", {label}") for _, right, label in lines
+                                 if right - right_edge >= by - _EDGE_TOLERANCE) + options
         else:
             options = sorted((right - right_edge, f", {label}") for _, right, label in lines
                              if right - right_edge <= by + _EDGE_TOLERANCE)[::-1]
         for aligned, label in options:
             if abs(aligned - by) > max(40.0, abs(by)):
-                break
+                continue
             if lands_clear(field, aligned):
                 by, where = aligned, label
                 break
@@ -3058,6 +3063,13 @@ def _script(text):
         return None
     script = max(rtl, key=rtl.get)
     return script if rtl[script] > ltr else "Latin"
+
+
+def _reads_right_to_left(shapes):
+    """Whether most of the letters on a slide read right to left."""
+    content = " ".join((s.get("text") or {}).get("content") or "" for s in shapes
+                       if s.get("visible", True))
+    return _script(content) in _RANGE_WORDS
 
 
 def _paragraphs(content):

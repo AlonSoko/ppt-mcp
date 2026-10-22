@@ -2058,6 +2058,17 @@ class TestTheTemplatesOwnGraphics:
         found = overlaps(check_on([BAND], title_placeholder(), note))
         assert found[0]["fix"].startswith("Move 'note' right by 78.6 pt, in line with 'Title 1'")
 
+    def test_on_a_right_to_left_slide_it_lines_up_the_right_edges(self):
+        title = title_placeholder()
+        title["width"] = 300
+        note = textbox("note", 20, 478, 320, 24)
+        found = overlaps(check_on([BAND], title, note))
+        assert found[0]["fix"].startswith("Move 'note' right by 78.6 pt, in line with 'Title 1'")
+        title["text"]["content"] = "ההיסטוריה של ישראל"
+        note["text"]["content"] = "מקור: הלשכה המרכזית לסטטיסטיקה"
+        found = overlaps(check_on([BAND], title, note))
+        assert found[0]["fix"].startswith("Move 'note' right by 58.6 pt, in line with 'Title 1'")
+
     def test_a_footnote_steps_up_rather_than_across_the_slide(self):
         cards = [card(f"c{i}", 40 + 305 * i, 150, 270, 200, z=2 + i) for i in range(3)]
         footnote = textbox("footnote", 40, 498, 400, 20, z=9, text_width=280, text_height=14)
