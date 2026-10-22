@@ -41,7 +41,7 @@ from ppt_com.constants import (
     msoChart, msoEmbeddedOLEObject, msoFillGradient, msoFillSolid, msoGroup, msoLine,
     msoLinkedOLEObject, msoLinkedPicture, msoMedia, msoPicture,
     msoPlaceholder, msoSmartArt, msoTable, msoTextBox, msoTrue,
-    ppAlignCenter, ppAlignRight, ppDirectionLeftToRight, ppDirectionRightToLeft,
+    ppAlignCenter, ppAlignRight, ppDirectionRightToLeft,
     ppPlaceholderCenterTitle, ppPlaceholderDate, ppPlaceholderFooter,
     ppPlaceholderBody, ppPlaceholderHeader, ppPlaceholderObject,
     ppPlaceholderSlideNumber, ppPlaceholderTitle, ppPlaceholderVerticalTitle,
@@ -1859,7 +1859,7 @@ def _low_contrast(slide_index, shapes, background_hex, template=(), follows_back
         # one slide; black or white is the answer when none of them is enough.
         ours = [c for c in _text_colours(shapes, shape, size)
                 if _contrast_ratio(c, backdrop) >= needed]
-        themed = _theme_text_colours(theme_colors, lambda c: _contrast_ratio(c, backdrop), needed)
+        themed = _theme_text_colours(theme_colors, lambda c, b=backdrop: _contrast_ratio(c, b), needed)
         if ours:
             suggestion, source = ours[0], ", the colour of the other text on the slide"
         elif themed:
@@ -2884,7 +2884,6 @@ def _vertical_margins(slide_index, layout, slide_h):
     # A slide with nothing near its top, a quote set in the middle, says
     # little about how close to the edge it means things to go.
     want = min(margins["vertical"], _VERTICAL_ROOM)
-    boxes = layout["boxes"]
     crowded = {}
     for shape in layout["arranged"]:
         if layout["depth"][shape["name"]] or shape.get("placeholder_type") in _LAYOUT_PLACEHOLDERS:
@@ -2903,7 +2902,7 @@ def _vertical_margins(slide_index, layout, slide_h):
                 crowded[shape["name"]] = (shape, ink, edge, distance)
                 break
     findings, done = [], set()
-    for name, (shape, ink, edge, distance) in crowded.items():
+    for name, (_, ink, edge, distance) in crowded.items():
         if name in done:
             continue
         row = [m for m in layout["rows"].get(name) or [name] if m in crowded

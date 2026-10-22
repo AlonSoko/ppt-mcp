@@ -418,7 +418,7 @@ def group_texts(path, slide_indices):
         for index, slide, _ in _slides(archive, slide_indices):
             inner = []
 
-            def walk(group, prefix, owner):
+            def walk(group, prefix, owner, into):
                 for element in group:
                     tag = element.tag.rsplit("}", 1)[-1]
                     nv = next((c for c in element if c.tag.rsplit("}", 1)[-1].startswith("nv")), None)
@@ -427,12 +427,12 @@ def group_texts(path, slide_indices):
                         continue
                     name = prefix + props.get("name", "")
                     if tag == "grpSp":
-                        walk(element, name + "/", owner)
+                        walk(element, name + "/", owner, into)
                         continue
                     body = element.find("p:txBody", _NS)
                     if tag != "sp" or body is None:
                         continue
-                    inner.append({
+                    into.append({
                         "name": name, "z": 0, "type": _AUTOSHAPE,
                         "left": 0.0, "top": 0.0, "width": 0.0, "height": 0.0,
                         "rotation": 0.0, "visible": True, "connector": False,
@@ -446,6 +446,6 @@ def group_texts(path, slide_indices):
             for group in tree.findall("p:grpSp", _NS) if tree is not None else []:
                 props = group.find("p:nvGrpSpPr/p:cNvPr", _NS)
                 if props is not None:
-                    walk(group, props.get("name", "") + "/", props.get("name", ""))
+                    walk(group, props.get("name", "") + "/", props.get("name", ""), inner)
             found[index] = inner
     return found
