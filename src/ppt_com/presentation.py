@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from utils.offload import run_offloaded
 from utils.color import int_to_hex
-from backend import ppt
+from backend import ppt, quit_if_ours
 from utils.onedrive import resolve_local_path
 from utils.com_wrapper import pywintypes
 from ppt_com.constants import (
@@ -203,6 +203,15 @@ class ClosePresentationInput(BaseModel):
         description=(
             "Name of the presentation (e.g. 'MySlides.pptx'). "
             "Alternative to presentation_index. If omitted, uses the active presentation."
+        ),
+    )
+    keep_powerpoint_open: bool = Field(
+        default=False,
+        description=(
+            "When this closes the last presentation of a PowerPoint this server "
+            "started, PowerPoint is quit, so no empty window is left behind. "
+            "Set true to keep it running, e.g. to open another deck straight "
+            "away. A PowerPoint the user started is never quit."
         ),
     )
 
@@ -516,6 +525,7 @@ def _close_presentation_impl(
     save_changes: bool,
     presentation_index: Optional[int],
     presentation_name: Optional[str],
+    keep_powerpoint_open: bool = False,
 ) -> dict:
     app = ppt._get_app_impl()
     pres = _resolve_presentation(
@@ -530,7 +540,10 @@ def _close_presentation_impl(
         pres.Saved = True
 
     pres.Close()
-    return {"success": True, "closed": name}
+    result = {"success": True, "closed": name}
+    if not keep_powerpoint_open and app.Presentations.Count == 0:
+        result.update(quit_if_ours(lambda: app.Quit()))
+    return result
 
 
 def _get_presentation_info_impl(
@@ -796,6 +809,7 @@ def close_presentation(params: ClosePresentationInput) -> str:
             params.save_changes,
             params.presentation_index,
             params.presentation_name,
+            params.keep_powerpoint_open,
         )
         return json.dumps(result)
     except Exception as e:
@@ -950,6 +964,9 @@ def register_tools(mcp):
         Set save_changes=true to save before closing.
         If save_changes=false (default), unsaved changes are discarded without
         prompting the user.
+
+        Closing the last presentation of a PowerPoint this server started
+        quits PowerPoint too; keep_powerpoint_open=true keeps it running.
         """
         return await run_offloaded(close_presentation, params)
 

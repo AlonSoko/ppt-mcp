@@ -65,10 +65,36 @@ def use_mac_impls(namespace, module) -> None:
     for name in dir(module):
         if name.startswith("_") and name.endswith("_impl"):
             namespace[name] = getattr(module, name)
+def quit_if_ours(quit) -> dict:
+    """Quit PowerPoint when this server started it, once no deck is open.
+
+    Closing the last deck leaves PowerPoint running with an empty window, or
+    its start screen on macOS, that nobody asked for and that stays until
+    someone quits it by hand. A PowerPoint the user started is theirs and is
+    left alone. ``quit`` is the platform's own call, ``app.Quit`` or
+    ``app.quit``, looked up only when it is called; the close tools call this
+    once their last deck is gone.
+    """
+    if not ppt._launched_by_us:
+        return {}
+    quit()
+    ppt._app = None
+    ppt._launched_by_us = False
+    ppt._target_pres_full_name = None
+    return {
+        "powerpoint_quit": True,
+        "note": (
+            "PowerPoint was quit: this server started it and its last "
+            "presentation is closed. ppt_create_presentation or "
+            "ppt_open_presentation starts it again."
+        ),
+    }
+
 
 __all__ = [
     "ppt",
     "use_mac_impls",
+    "quit_if_ours",
     "handle_com_error",
     "AUTO_DISMISS_DIALOG",
     "unsupported",
