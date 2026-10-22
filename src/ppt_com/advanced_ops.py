@@ -73,14 +73,15 @@ def _fetch_icon_metadata():
         resp = open_url(ICON_METADATA_URL, "download the icon list", "PPT_ICON_METADATA_URL")
         raw = resp.read().decode("utf-8")
 
-        # Strip XSS protection prefix  )]}'
-        first_nl = raw.index("\n")
-        json_str = raw[first_nl + 1:]
-        data = json.loads(json_str)
+        # Google Fonts puts an XSS guard line, )]}', before the JSON. A copy
+        # from a mirror, or saved without it, starts with the JSON itself.
+        if raw.startswith(")]}'"):
+            raw = raw[raw.index("\n") + 1:]
+        data = json.loads(raw)
 
         _icon_cache = data.get("icons", [])
         _icon_cache_time = now
-        logger.info("Fetched %d icons from Google Fonts metadata", len(_icon_cache))
+        logger.info("Read %d icons from %s", len(_icon_cache), ICON_METADATA_URL)
         return _icon_cache
 
 

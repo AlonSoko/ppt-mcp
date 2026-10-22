@@ -129,6 +129,18 @@ class TestALocalCopy:
         monkeypatch.setattr(advanced_ops, "_icon_cache", None)
         assert advanced_ops._fetch_icon_metadata() == [{"name": "home"}]
 
+    def test_and_from_a_copy_without_the_guard_line(self, tmp_path, monkeypatch, caplog):
+        from ppt_com import advanced_ops
+
+        saved = tmp_path / "icons.json"
+        saved.write_text(json.dumps({"icons": [{"name": "home"}]}, indent=2))
+        monkeypatch.setattr(advanced_ops, "ICON_METADATA_URL", saved.as_uri())
+        monkeypatch.setattr(advanced_ops, "_icon_cache", None)
+        with caplog.at_level("INFO", logger=advanced_ops.logger.name):
+            assert advanced_ops._fetch_icon_metadata() == [{"name": "home"}]
+        # The log names where the list came from, not always Google Fonts.
+        assert f"Read 1 icons from {saved.as_uri()}" in caplog.text
+
 
 class TestTheSettings:
     def _read(self, **env):
