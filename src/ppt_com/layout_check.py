@@ -1605,6 +1605,21 @@ def _template_shrink(a, union, named, keep):
     return min(options)[1] if options else None
 
 
+def _kept_edges(shape):
+    """The sides of its frame a shape is seen to keep: what lining up with it means.
+
+    A shape that paints its box keeps both. Text alone keeps only the side it
+    is set to: a centred title's frame edges are nowhere a reader can see, and
+    the far edge of left-set text is wherever its longest line ends.
+    """
+    if paints_box(shape):
+        return {"left", "right"}
+    anchor = _text_anchor(shape)
+    if anchor is None:
+        return {"left", "right"}
+    return {"full": {"left", "right"}, "left": {"left"}, "right": {"right"}}.get(anchor[0], set())
+
+
 def _template_move(a, a_ink, union, named, shapes, graphics, layout):
     """The shortest move that takes a shape clear of a template graphic.
 
@@ -1683,23 +1698,31 @@ def _template_move(a, a_ink, union, named, shapes, graphics, layout):
     field, by, words = chosen
     where = ""
     if field == "left":
-        lines = [(s["left"], s["left"] + s["width"], f"in line with '{s['name']}'")
-                 for s in layout["arranged"] if s["name"] not in skip]
+        lines = []
+        for s in layout["arranged"]:
+            if s["name"] in skip:
+                continue
+            kept = _kept_edges(s)
+            lines.append((s["left"] if "left" in kept else None,
+                          s["left"] + s["width"] if "right" in kept else None,
+                          f"in line with '{s['name']}'"))
         margin = (layout.get("margins") or {}).get("horizontal")
         if margin is not None and slide_w:
             lines.append((margin, slide_w - margin, "on the slide's margin"))
         right_edge = a["left"] + a["width"]
         if by > 0:
             options = sorted((left - a["left"], f", {label}") for left, _, label in lines
-                             if left - a["left"] >= by - _EDGE_TOLERANCE)
+                             if left is not None and left - a["left"] >= by - _EDGE_TOLERANCE)
             if _reads_right_to_left(shapes):
                 # A right-to-left slide keeps its right edges; the left
                 # ones are wherever its lines happen to end.
                 options = sorted((right - right_edge, f", {label}") for _, right, label in lines
-                                 if right - right_edge >= by - _EDGE_TOLERANCE) + options
+                                 if right is not None
+                                 and right - right_edge >= by - _EDGE_TOLERANCE) + options
         else:
             options = sorted((right - right_edge, f", {label}") for _, right, label in lines
-                             if right - right_edge <= by + _EDGE_TOLERANCE)[::-1]
+                             if right is not None
+                             and right - right_edge <= by + _EDGE_TOLERANCE)[::-1]
         for aligned, label in options:
             if abs(aligned - by) > max(40.0, abs(by)):
                 continue

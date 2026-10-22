@@ -2044,6 +2044,14 @@ def title_placeholder(name="Title 1", left=98.56, top=30, size=28.0, colour="#0B
     return title
 
 
+def set_to(shape, side):
+    """Draw a text box's text at the right of its frame, or at its centre."""
+    words, inset = shape["text"], 7.2
+    room = shape["width"] - 2 * inset - words["width"]
+    words["left"] = shape["left"] + inset + (room if side == "right" else room / 2)
+    return shape
+
+
 class TestTheTemplatesOwnGraphics:
     def test_text_on_a_band_down_the_side_is_moved_clear_of_it(self):
         note = textbox("note", 20, 478, 320, 24)
@@ -2065,9 +2073,30 @@ class TestTheTemplatesOwnGraphics:
         found = overlaps(check_on([BAND], title, note))
         assert found[0]["fix"].startswith("Move 'note' right by 78.6 pt, in line with 'Title 1'")
         title["text"]["content"] = "ההיסטוריה של ישראל"
+        set_to(title, "right")
         note["text"]["content"] = "מקור: הלשכה המרכזית לסטטיסטיקה"
         found = overlaps(check_on([BAND], title, note))
         assert found[0]["fix"].startswith("Move 'note' right by 58.6 pt, in line with 'Title 1'")
+
+    def test_a_centred_title_is_not_an_edge_to_line_up_with(self):
+        # Its frame starts at 98.56, but its text 325 pt further in: a note
+        # put at the frame's edge is in line with nothing a reader sees.
+        title = set_to(title_placeholder(), "center")
+        note = textbox("note", 20, 478, 320, 24)
+        [found] = overlaps(check_on([BAND], title, note))
+        assert "in line with 'Title 1'" not in found["fix"]
+        assert found["fix"].startswith("Move 'note' right by 48.8 pt (ppt_update_shape dleft=48.8)")
+
+    def test_only_the_side_text_is_set_to_counts(self):
+        # A right-set title keeps its right edge, not its left.
+        title = set_to(title_placeholder(), "right")
+        note = textbox("note", 20, 478, 320, 24)
+        [found] = overlaps(check_on([BAND], title, note))
+        assert "in line with 'Title 1'" not in found["fix"]
+        # A card keeps both, whatever its text does.
+        card_ = card("panel", 98.56, 150, 300, 200, z=2)
+        [found] = overlaps(check_on([BAND], title, card_, note))
+        assert found["fix"].startswith("Move 'note' right by 78.6 pt, in line with 'panel'")
 
     def test_a_footnote_steps_up_rather_than_across_the_slide(self):
         cards = [card(f"c{i}", 40 + 305 * i, 150, 270, 200, z=2 + i) for i in range(3)]
