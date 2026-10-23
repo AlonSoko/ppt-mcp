@@ -1909,6 +1909,12 @@ def _format_text_range_impl(slide_index, shape_name_or_index, start, length,
 def _set_paragraph_format_impl(slide_index, shape_name_or_index, paragraph_index,
                                  alignment, line_spacing, space_before, space_after,
                                  indent_level, first_line_indent, direction=None) -> dict:
+    # Checked before anything is written, so a bad value changes nothing.
+    if alignment is not None and alignment not in ALIGNMENT_MAP:
+        raise ValueError(
+            f"Invalid alignment '{alignment}'. "
+            f"Valid values: {list(ALIGNMENT_MAP.keys())}"
+        )
     app = ppt._get_app_impl()
     goto_slide(app, slide_index)
     pres = ppt._get_pres_impl()
@@ -1942,13 +1948,7 @@ def _set_paragraph_format_impl(slide_index, shape_name_or_index, paragraph_index
                 paragraph.ParagraphFormat.Alignment = value
 
     if alignment is not None:
-        align_val = ALIGNMENT_MAP.get(alignment)
-        if align_val is None:
-            raise ValueError(
-                f"Invalid alignment '{alignment}'. "
-                f"Valid values: {list(ALIGNMENT_MAP.keys())}"
-            )
-        pf.Alignment = align_val
+        pf.Alignment = ALIGNMENT_MAP[alignment]
 
     if line_spacing is not None:
         pf.LineRuleWithin = msoTrue
