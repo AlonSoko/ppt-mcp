@@ -3731,10 +3731,12 @@ def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
         member = unreachable.get(finding["shapes"][0])
         if member is None:
             continue
-        group, own = member["in_group"], member["name"].rsplit("/", 1)[-1]
-        finding["fix"] = (f"Ungroup '{group}' first (ppt_ungroup_shapes shape_name_or_index="
-                          f"'{group}'): PowerPoint for Mac does not reach inside a group. "
-                          f"Then, with '{own}' as the shape: "
+        groups, own = member.get("groups") or [member["in_group"]], member["name"].rsplit("/", 1)[-1]
+        # A group in a group is still one after the outer is ungrouped.
+        calls = ", then ".join(f"ppt_ungroup_shapes shape_name_or_index='{g}'" for g in groups)
+        named = " and then ".join(f"'{g}'" for g in groups)
+        finding["fix"] = (f"Ungroup {named} first ({calls}): PowerPoint for Mac does not "
+                          f"reach inside a group. Then, with '{own}' as the shape: "
                           + finding["fix"].replace(member["name"], own))
     return findings
 

@@ -3510,8 +3510,17 @@ def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
     [rule] = found["graphics"]
     assert (rule["name"], rule["top"], rule["height"]) == ("Rule", 100.0, 1.5)
     assert rule["fill"]["color_hex"] == "#C0504D"
+    assert rule["visible"] is True
     # The theme's fonts, which the Mac holds a chosen right-to-left font to.
     assert found["theme_fonts"] == {"latin": ["Calibri Light", "Calibri"], "script": ["Arial"]}
+    # A rule the layout hides is not drawn, and nothing runs across it.
+    entries["ppt/slideLayouts/slideLayout1.xml"] = layout.replace(
+        'name="Rule"/>', 'name="Rule" hidden="1"/>').encode()
+    with zipfile.ZipFile(path, "w") as archive:
+        for n, data in entries.items():
+            archive.writestr(n, data)
+    [rule] = layout_facts(path, [1])[1]["graphics"]
+    assert rule["visible"] is False
 
 
 class TestInsideGroups:
@@ -3571,6 +3580,79 @@ def test_the_text_inside_a_group_is_read_from_the_file(tmp_path):
     text = inner["text"]
     assert text["content"] == "1516 עד 1917" and text["directions"] == ["rtl"]
     assert text["runs"][0]["font"] == "David" and text["script_font"] == "Arial"
+
+
+def group_file(tmp_path, body, outer="", inner="", member=""):
+    group = (f'<p:grpSp><p:nvGrpSpPr><p:cNvPr id="4" name="Group 1"{outer}/></p:nvGrpSpPr><p:grpSpPr/>'
+             f'<p:grpSp><p:nvGrpSpPr><p:cNvPr id="6" name="Group 2"{inner}/></p:nvGrpSpPr><p:grpSpPr/>'
+             f'<p:sp><p:nvSpPr><p:cNvPr id="5" name="TextBox 3"{member}/></p:nvSpPr><p:spPr/>'
+             f'<p:txBody>{body}</p:txBody></p:sp></p:grpSp></p:grpSp>')
+    return deck_file(tmp_path, [group], {})
+
+
+ENGLISH = ('<a:p><a:r><a:rPr><a:latin typeface="Helvetica"/><a:cs typeface="Times New Roman"/>'
+           '</a:rPr><a:t>Quarterly results</a:t></a:r></a:p>')
+
+
+class TestGroupTextFromTheFile:
+    def test_english_has_no_right_to_left_font(self, tmp_path):
+        # It was reported as drawn in its unused right-to-left font.
+        from utils.package import group_texts
+
+        [inner] = group_texts(group_file(tmp_path, ENGLISH), [1])[1]
+        assert inner["text"]["script_font"] is None
+        assert [f for f in layout_check._fonts(1, [inner]) if f["type"] == "font_missing"] == []
+
+    @pytest.mark.parametrize("where", ["outer", "inner", "member"])
+    def test_hidden_text_is_not_visible(self, tmp_path, where):
+        from utils.package import group_texts
+
+        [inner] = group_texts(group_file(tmp_path, ENGLISH, **{where: ' hidden="1"'}), [1])[1]
+        assert inner["visible"] is False
+
+    def test_a_group_in_a_group_is_ungrouped_in_turn(self, tmp_path):
+        from utils.package import group_texts
+
+        body = '<a:p><a:r><a:t>Lorem ipsum dolor</a:t></a:r></a:p>'
+        [inner] = group_texts(group_file(tmp_path, body), [1])[1]
+        assert inner["groups"] == ["Group 1", "Group 2"]
+        page = slide()
+        page["inner"] = [inner]
+        [finding] = slide_findings(page, W, H)
+        assert finding["fix"].startswith(
+            "Ungroup 'Group 1' and then 'Group 2' first (ppt_ungroup_shapes "
+            "shape_name_or_index='Group 1', then ppt_ungroup_shapes shape_name_or_index='Group 2')")
+
+    def test_a_line_break_and_a_field_are_kept(self, tmp_path):
+        from utils.package import group_texts
+
+        body = ('<a:p><a:r><a:t>Hello</a:t></a:r><a:br/><a:r><a:t>World </a:t></a:r>'
+                '<a:fld id="{1}" type="slidenum"><a:t>3</a:t></a:fld></a:p>')
+        [inner] = group_texts(group_file(tmp_path, body), [1])[1]
+        assert inner["text"]["content"] == "Hello\vWorld 3"
+
+    def test_a_direction_set_by_the_shapes_list_style_is_read(self, tmp_path):
+        from utils.package import group_texts
+
+        body = ('<a:lstStyle><a:lvl1pPr rtl="1"/></a:lstStyle>'
+                '<a:p><a:r><a:t>שלום</a:t></a:r></a:p><a:p><a:pPr rtl="0"/><a:r><a:t>שלום</a:t></a:r></a:p>')
+        [inner] = group_texts(group_file(tmp_path, body), [1])[1]
+        assert inner["text"]["directions"] == ["rtl", "ltr"]
+
+    def test_a_direction_set_for_the_whole_deck_is_read(self, tmp_path):
+        from utils.package import group_texts
+
+        path = group_file(tmp_path, '<a:p><a:r><a:t>שלום</a:t></a:r></a:p>')
+        entries = {n: zipfile.ZipFile(path).read(n) for n in zipfile.ZipFile(path).namelist()}
+        entries["ppt/presentation.xml"] = PRESENTATION.replace(
+            "</p:presentation>",
+            '<p:defaultTextStyle><a:lvl1pPr xmlns:a="http://schemas.openxmlformats.org/'
+            'drawingml/2006/main" rtl="1"/></p:defaultTextStyle></p:presentation>').encode()
+        with zipfile.ZipFile(path, "w") as archive:
+            for n, data in entries.items():
+                archive.writestr(n, data)
+        [inner] = group_texts(path, [1])[1]
+        assert inner["text"]["directions"] == ["rtl"]
 
 
 # ---------------------------------------------------------------------------

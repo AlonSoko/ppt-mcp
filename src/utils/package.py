@@ -8,6 +8,7 @@ them needs nothing past the standard library.
 
 import posixpath
 import struct
+import unicodedata
 import zipfile
 from xml.etree import ElementTree
 
@@ -329,6 +330,7 @@ def _layout_shapes(root, scheme):
         props_name = {"sp": "p:spPr", "pic": "p:spPr", "cxnSp": "p:spPr", "grpSp": "p:grpSpPr"}[tag]
         props = element.find(props_name, _NS)
         name = nv.find("p:cNvPr", _NS).get("name") if nv is not None else ""
+        hidden = nv is not None and _hidden(nv.find("p:cNvPr", _NS))
         placeholder = nv.find("p:nvPr/p:ph", _NS) if nv is not None else None
         placed = _box(props)
         if placeholder is not None:
@@ -344,7 +346,7 @@ def _layout_shapes(root, scheme):
         outline = props.find("a:ln", _NS) if props is not None else None
         graphics.append({
             "name": name, "type": kind, "left": left, "top": top, "width": width,
-            "height": height, "rotation": rotation, "visible": True, "connector": tag == "cxnSp",
+            "height": height, "rotation": rotation, "visible": not hidden, "connector": tag == "cxnSp",
             "placeholder_type": None,
             "fill": None if kind in (_GROUP, _LINE) else _fill(props, element.find("p:style", _NS), scheme),
             "line_visible": None if outline is None else outline.find("a:noFill", _NS) is None,
@@ -385,19 +387,52 @@ def layout_facts(path, slide_indices):
 # ---------------------------------------------------------------------------
 # What is inside groups
 # ---------------------------------------------------------------------------
-def _text_facts(body):
-    """The text facts the content checks read, from a shape's text body."""
+def _hidden(props):
+    return props is not None and props.get("hidden") in ("1", "true")
+
+
+def _right_to_left(text):
+    return any(unicodedata.bidirectional(ch) in ("R", "AL") for ch in text)
+
+
+def _level_directions(styles):
+    """The rtl setting of each outline level a list of styles sets, {1: True}."""
+    found = {}
+    for level in range(1, 10):
+        props = styles.find(f"a:lvl{level}pPr", _NS) if styles is not None else None
+        if props is not None and props.get("rtl") is not None:
+            found[level] = props.get("rtl") in ("1", "true")
+    return found
+
+
+def _text_facts(body, inherited=None):
+    """The text facts the content checks read, from a shape's text body.
+
+    ``inherited`` is the direction each outline level takes from the deck's
+    default text style, overridden by the shape's own list styles.
+    """
     paragraphs, runs, directions, scripts = [], set(), [], set()
+    levels = {**(inherited or {}), **_level_directions(body.find("a:lstStyle", _NS))}
     for paragraph in body.findall("a:p", _NS):
         props = paragraph.find("a:pPr", _NS)
         first = paragraph.find("a:r/a:rPr", _NS)
         language = (first.get("lang") or "").split("-")[0].lower() if first is not None else ""
-        # Set right to left, or in a language PowerPoint draws from the right.
-        directions.append("rtl" if (props is not None and props.get("rtl") in ("1", "true"))
+        level = int(props.get("lvl", "0")) + 1 if props is not None else 1
+        rtl = props.get("rtl") if props is not None else None
+        # Set right to left, here or by its style, or in a language PowerPoint
+        # draws from the right.
+        directions.append("rtl" if (rtl in ("1", "true") if rtl is not None else levels.get(level))
                           or language in ("he", "iw", "ar", "fa", "ur", "yi", "syr", "dv")
                           else "ltr")
         words = []
-        for run in paragraph.findall("a:r", _NS):
+        for run in paragraph:
+            tag = run.tag.rsplit("}", 1)[-1]
+            if tag == "br":
+                # A line break inside the paragraph, as PowerPoint hands it back.
+                words.append("\v")
+                continue
+            if tag not in ("r", "fld"):
+                continue
             text = run.findtext("a:t", default="", namespaces=_NS)
             words.append(text)
             rpr = run.find("a:rPr", _NS)
@@ -408,7 +443,8 @@ def _text_facts(body):
             size = rpr.get("sz")
             runs.add((latin.get("typeface") if latin is not None else None,
                       int(size) / 100 if size else None, rpr.get("b") in ("1", "true")))
-            if cs is not None:
+            # Only Hebrew or Arabic is drawn in the right-to-left font.
+            if cs is not None and _right_to_left(text):
                 scripts.add(cs.get("typeface"))
         paragraphs.append("".join(words))
     content = "\r".join(paragraphs)
@@ -434,10 +470,12 @@ def group_texts(path, slide_indices):
     """
     found = {}
     with zipfile.ZipFile(path) as archive:
+        presentation = ElementTree.fromstring(archive.read("ppt/presentation.xml"))
+        inherited = _level_directions(presentation.find("p:defaultTextStyle", _NS))
         for index, slide, _ in _slides(archive, slide_indices):
             inner = []
 
-            def walk(group, prefix, owner, into):
+            def walk(group, prefix, owners, hidden, into):
                 for element in group:
                     tag = element.tag.rsplit("}", 1)[-1]
                     nv = next((c for c in element if c.tag.rsplit("}", 1)[-1].startswith("nv")), None)
@@ -446,7 +484,8 @@ def group_texts(path, slide_indices):
                         continue
                     name = prefix + props.get("name", "")
                     if tag == "grpSp":
-                        walk(element, name + "/", owner, into)
+                        walk(element, name + "/", owners + [props.get("name", "")],
+                             hidden or _hidden(props), into)
                         continue
                     body = element.find("p:txBody", _NS)
                     if tag != "sp" or body is None:
@@ -454,9 +493,12 @@ def group_texts(path, slide_indices):
                     into.append({
                         "name": name, "z": 0, "type": _AUTOSHAPE,
                         "left": 0.0, "top": 0.0, "width": 0.0, "height": 0.0,
-                        "rotation": 0.0, "visible": True, "connector": False,
+                        "rotation": 0.0, "visible": not (hidden or _hidden(props)),
+                        "connector": False,
                         "placeholder_type": None, "fill": None, "line_visible": None,
-                        "text": _text_facts(body), "in_group": owner,
+                        "text": _text_facts(body, inherited), "in_group": owners[0],
+                        # Outermost first: each is ungrouped in turn to reach it.
+                        "groups": owners,
                         # Read from the file because the tools cannot reach it.
                         "reachable": False,
                     })
@@ -465,6 +507,7 @@ def group_texts(path, slide_indices):
             for group in tree.findall("p:grpSp", _NS) if tree is not None else []:
                 props = group.find("p:nvGrpSpPr/p:cNvPr", _NS)
                 if props is not None:
-                    walk(group, props.get("name", "") + "/", props.get("name", ""), inner)
+                    walk(group, props.get("name", "") + "/", [props.get("name", "")],
+                         _hidden(props), inner)
             found[index] = inner
     return found
