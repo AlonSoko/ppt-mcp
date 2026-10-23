@@ -380,6 +380,9 @@ class PowerPointAppleEventWrapper:
         # Windows: `active presentation` raises -1728 whenever PowerPoint's
         # start gallery is the frontmost window, which users hit every day.
         self._target_pres_full_name: Optional[str] = None
+        # Whether this server started PowerPoint, rather than finding it
+        # running. Only then is it quit when its last presentation closes.
+        self._launched_by_us = False
         # The per-call target of the job the worker is running, if its tool
         # call named one. See `call_presentation` in utils.com_wrapper.
         self._call_local = threading.local()
@@ -611,7 +614,10 @@ class PowerPointAppleEventWrapper:
                     "PowerPoint is not running. Call ppt_connect, "
                     "ppt_create_presentation, or ppt_open_presentation first."
                 )
-            candidate.activate()
+            # In the background. PowerPoint's windows arrive on screen by
+            # themselves; activating it took the front from whatever the
+            # user was typing in, every time a tool call started it.
+            candidate.launch()
             # Launching is not instant, and the first event against a starting
             # application fails rather than waiting.
             deadline = time.time() + 20
@@ -625,7 +631,10 @@ class PowerPointAppleEventWrapper:
                 raise ConnectionError(
                     "PowerPoint did not finish starting. Is it installed?"
                 )
-        elif visible:
+            self._launched_by_us = True
+        else:
+            self._launched_by_us = False
+        if visible:
             candidate.activate()
 
         self._app = candidate

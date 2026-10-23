@@ -295,6 +295,9 @@ class PowerPointCOMWrapper:
         self._queue: Queue = Queue()
         self._running = False
         self._target_pres_full_name: Optional[str] = None  # session-level target (FullName for uniqueness)
+        # Whether this server started PowerPoint, rather than finding it
+        # running. Only then is it quit when its last presentation closes.
+        self._launched_by_us = False
         # The per-call target of the operation a worker is running, if its
         # tool call named one (see call_presentation).  Thread-local, because
         # an abandoned worker and its replacement can overlap.
@@ -798,6 +801,7 @@ class PowerPointCOMWrapper:
         try:
             self._app = win32com.client.GetActiveObject("PowerPoint.Application")
             logger.info("Attached to existing PowerPoint instance")
+            self._launched_by_us = False
         except pywintypes.com_error as e:
             if e.hresult in _BUSY_HRESULTS:
                 # PowerPoint is running but busy (modal dialog). Re-raise as
@@ -812,6 +816,7 @@ class PowerPointCOMWrapper:
                 self._app = win32com.client.Dispatch("PowerPoint.Application")
                 logger.info("Launched new PowerPoint instance via Dispatch")
                 launched_new = True
+                self._launched_by_us = True
             except pywintypes.com_error as e2:
                 if e2.hresult in _BUSY_HRESULTS:
                     raise  # PowerPoint busy — _run_item decides whether to retry

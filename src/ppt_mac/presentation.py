@@ -38,6 +38,7 @@ from backend.mac_ae import (
     ppt,
     resolve_presentation as _resolve_presentation,
 )
+from backend import quit_if_ours
 from backend.mac_enums import PpSaveAsFileType, to_keyword
 from ppt_com.constants import (
     ppSaveAsDefault,
@@ -93,6 +94,22 @@ _TEMPLATE_DIR_CANDIDATES = (
 # ---------------------------------------------------------------------------
 # Small helpers over the object model and the filesystem
 # ---------------------------------------------------------------------------
+def _bring_window_forward(app, pres, full_name: str) -> None:
+    """Make the deck's window PowerPoint's active one, if it is not already.
+
+    Activating a window brings PowerPoint in front of whatever the user is
+    working in. A deck PowerPoint has just created or opened is already its
+    active window, so there is nothing to do and the front is left alone; it
+    is taken only when another deck's window is in the way.
+    """
+    try:
+        if app.active_window.presentation.full_name() == full_name:
+            return
+    except Exception:  # noqa: BLE001 - no window yet, so activate to be sure
+        pass
+    pres.document_windows[1].activate()
+
+
 def _index_of(app, full_name: str) -> Optional[int]:
     """The 1-based position of a presentation among the open ones."""
     names = _full_names(app)
@@ -292,7 +309,7 @@ def _create_presentation_impl(
 
     if activate:
         try:
-            pres.document_windows[1].activate()
+            _bring_window_forward(app, pres, full_name)
         except Exception as exc:  # noqa: BLE001 - the deck still exists
             logger.warning("Could not activate new presentation window: %s", exc)
         ppt._target_pres_full_name = full_name
@@ -351,7 +368,7 @@ def _open_presentation_impl(
     if activate:
         if with_window:
             try:
-                pres.document_windows[1].activate()
+                _bring_window_forward(app, pres, full_name)
             except Exception as exc:  # noqa: BLE001 - the deck is still open
                 logger.warning(
                     "Could not activate opened presentation window: %s", exc
@@ -673,6 +690,7 @@ def _close_presentation_impl(
     save_changes: bool,
     presentation_index: Optional[int],
     presentation_name: Optional[str],
+    keep_powerpoint_open: bool = False,
 ) -> dict:
     app = ppt._get_app_impl()
     pres = _resolve_presentation(
@@ -720,6 +738,8 @@ def _close_presentation_impl(
     result = {"success": True, "closed": name}
     if closed_copy:
         result["also_copied_to"] = closed_copy
+    if not keep_powerpoint_open and not _full_names(app):
+        result.update(quit_if_ours(lambda: app.quit()))
     return result
 
 
