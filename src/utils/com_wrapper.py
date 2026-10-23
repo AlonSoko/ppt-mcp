@@ -785,10 +785,11 @@ class PowerPointCOMWrapper:
             import win32process
         except ImportError:
             return None
-        # The application's own handle first; a window's when it has none,
-        # which PowerPoint can answer right after it starts.
+        # Application has no usable HWND (late binding answers with a bound
+        # method), so ask a document window first. A just-started PowerPoint
+        # has none, so fall back on its main frame, which exists from the
+        # moment Dispatch returns, hidden or not.
         for handle in (
-            lambda: self._app.HWND,
             lambda: self._app.ActiveWindow.HWND,
             lambda: self._app.Windows(1).HWND,
         ):
@@ -798,7 +799,20 @@ class PowerPointCOMWrapper:
                     return win32process.GetWindowThreadProcessId(hwnd)[1]
             except Exception:  # noqa: BLE001 - try the next way of asking
                 logger.debug("Could not read a window handle", exc_info=True)
-        return None
+        try:
+            import win32gui
+            pids = set()
+
+            def _frame(hwnd, _):
+                if win32gui.GetClassName(hwnd) == "PPTFrameClass":
+                    pids.add(win32process.GetWindowThreadProcessId(hwnd)[1])
+
+            win32gui.EnumWindows(_frame, None)
+        except Exception:  # noqa: BLE001 - no id is better than a wrong one
+            logger.debug("Could not enumerate PowerPoint frames", exc_info=True)
+            return None
+        # Two PowerPoints running makes the frame ambiguous.
+        return next(iter(pids)) if len(pids) == 1 else None
 
     def _still_ours(self) -> bool:
         """Whether the PowerPoint held now is the one this server started.

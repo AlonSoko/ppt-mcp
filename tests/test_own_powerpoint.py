@@ -113,33 +113,44 @@ class TestMacKnowsWhichPowerPointItStarted:
 
 
 class TestWindowsReadsTheProcessIdFromAWindow:
-    def _wrapper(self, monkeypatch, app, pid=4242):
+    def _wrapper(self, monkeypatch, app, pid=4242, frames=()):
         import sys
         from utils.com_wrapper import PowerPointCOMWrapper
 
         process = MagicMock()
         process.GetWindowThreadProcessId.side_effect = lambda hwnd: (0, pid + hwnd)
         monkeypatch.setitem(sys.modules, "win32process", process)
+        gui = MagicMock()
+        gui.GetClassName.return_value = "PPTFrameClass"
+        gui.EnumWindows.side_effect = lambda cb, extra: [cb(h, extra) for h in frames]
+        monkeypatch.setitem(sys.modules, "win32gui", gui)
         wrapper = PowerPointCOMWrapper()
         wrapper._app = app
         return wrapper
 
-    def test_the_application_handle_is_used_first(self, monkeypatch):
-        app = MagicMock(HWND=1)
+    def test_the_active_window_is_used_first(self, monkeypatch):
+        app = MagicMock(ActiveWindow=MagicMock(HWND=1))
         assert self._wrapper(monkeypatch, app)._app_pid() == 4243
 
-    def test_a_window_answers_when_the_application_has_no_handle(self, monkeypatch):
-        class App:
-            @property
-            def HWND(self):
-                raise AttributeError("HWND")
+    def test_the_application_handle_is_not_used(self, monkeypatch):
+        # Late binding answers Application.HWND with a bound method.
+        app = MagicMock(HWND=1, ActiveWindow=MagicMock(HWND=2))
+        assert self._wrapper(monkeypatch, app)._app_pid() == 4244
 
-            ActiveWindow = MagicMock(HWND=2)
+    def test_the_main_frame_answers_when_there_is_no_document_window(self, monkeypatch):
+        app = MagicMock()
+        app.ActiveWindow.HWND = 0
+        app.Windows.side_effect = RuntimeError("no window")
+        assert self._wrapper(monkeypatch, app, frames=[5])._app_pid() == 4247
 
-        assert self._wrapper(monkeypatch, App())._app_pid() == 4244
+    def test_two_frames_are_ambiguous(self, monkeypatch):
+        app = MagicMock()
+        app.ActiveWindow.HWND = 0
+        app.Windows.side_effect = RuntimeError("no window")
+        assert self._wrapper(monkeypatch, app, frames=[5, 6])._app_pid() is None
 
     def test_a_zero_handle_is_not_an_answer(self, monkeypatch):
-        app = MagicMock(HWND=0, ActiveWindow=MagicMock(HWND=0))
+        app = MagicMock(ActiveWindow=MagicMock(HWND=0))
         app.Windows.side_effect = RuntimeError("no window")
         assert self._wrapper(monkeypatch, app)._app_pid() is None
 
