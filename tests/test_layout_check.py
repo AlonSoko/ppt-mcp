@@ -7,6 +7,7 @@ run over fake COM objects, since it is the half CI exercises.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -3618,7 +3619,28 @@ class TestTextOnAPhoto:
         page["shapes"][1]["text"]["height"] = 100
         [finding] = slide_findings(page, W, H)
         assert "ppt_add_shape shape_type='rectangle'" in finding["fix"]
-        assert "zorder='behind_text'" in finding["fix"]
+        # Added at the front and the text brought over it: 'behind_text' goes
+        # under the lowest text on the slide, often the title, under the photo.
+        assert "zorder" not in finding["fix"].split("ppt_set_shape_zorder")[0]
+        assert ("ppt_set_shape_zorder shape_name='Caption' command='bring_to_front'"
+                in finding["fix"])
+
+    def test_following_the_card_fix_leaves_the_slide_clean(self):
+        # The card sat 0.8 pt off the text box, which read as a slip.
+        page = self.photo_slide((250, 250, 250), (10, 10, 10), text_top=240)
+        caption = page["shapes"][1]
+        caption["height"], caption["text"]["height"] = 120, 100
+        [finding] = slide_findings(page, W, H)
+        at = {k: float(v) for k, v in re.findall(r"\b(left|top|width|height)=([\d.]+)",
+                                                  finding["fix"])}
+        assert (at["left"], at["top"]) == (caption["left"], caption["top"])
+        backing = card("Scrim", at["left"], at["top"], at["width"], at["height"], z=3,
+                       colour="#000000")
+        backing["fill"]["transparency"] = 0.35
+        caption["z"] = 4
+        caption["text"]["runs"][0]["color_hex"] = "#FFFFFF"
+        page["shapes"].append(backing)
+        assert slide_findings(page, W, H) == []
 
     def test_a_photo_never_sampled_is_not_judged(self):
         page = self.photo_slide((200, 220, 240), (40, 40, 40))

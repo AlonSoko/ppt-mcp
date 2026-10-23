@@ -2001,11 +2001,19 @@ def _photo_contrast(slide_index, shape, picture, theme_colors=None):
         light = sum(_luminance(b) for b in behind) / len(behind) > 0.5
         scrim = "#FFFFFF" if light else "#000000"
         pad = 8.0
+        # A side that lands within a few points of the text box's own edge
+        # goes on it: a card just off the box reads as a slip.
+        frame = shape_box(shape)
+        card = [words[0] - pad, words[1] - pad, words[2] + pad, words[3] + pad]
+        for side in range(4):
+            if abs(card[side] - frame[side]) <= pad:
+                card[side] = frame[side]
         fix = (f"Put a see-through card behind the text: ppt_add_shape shape_type='rectangle' "
-               f"left={_num(words[0] - pad)} top={_num(words[1] - pad)} "
-               f"width={_num(_width(words) + 2 * pad)} height={_num(_height(words) + 2 * pad)} "
-               f"fill_color='{scrim}' fill_transparency=0.35 line_visible=false "
-               f"zorder='behind_text', and make the text {'#000000' if light else '#FFFFFF'}")
+               f"left={_num(card[0])} top={_num(card[1])} "
+               f"width={_num(card[2] - card[0])} height={_num(card[3] - card[1])} "
+               f"fill_color='{scrim}' fill_transparency=0.35 line_visible=false, "
+               f"bring the text back in front of it (ppt_set_shape_zorder shape_name='{name}' "
+               f"command='bring_to_front'), and make the text {'#000000' if light else '#FFFFFF'}")
     return _finding(
         slide_index, "low_contrast", [name, picture["name"]],
         f"Text in '{name}' is {colour} on the photo '{picture['name']}': "
