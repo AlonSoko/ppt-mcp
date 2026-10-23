@@ -5293,12 +5293,13 @@ def report_layouts(result: dict, touched) -> dict:
 
     ``touched`` maps each slide index to the shapes touched on it.
     """
+    # What a write hands the check is not for its caller, checked or not.
+    natural = result.pop("_natural_aspect", None) if isinstance(result, dict) else None
     if not CHECK_EACH_WRITE:
         return result
     touched = {index: [s for s in shapes if s not in (None, "")]
                for index, shapes in (touched or {}).items()}
     touched = {index: shapes for index, shapes in touched.items() if shapes}
-    natural = result.pop("_natural_aspect", None) if isinstance(result, dict) else None
     if not touched or not isinstance(result, dict) or "error" in result:
         return result
     aspects = {result["shape_name"]: natural} if natural and result.get("shape_name") else None

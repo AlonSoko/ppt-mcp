@@ -2640,6 +2640,13 @@ class TestTurnedOff:
         assert report_layout({"shape_name": "c"}, 1, ["c"]) == {"shape_name": "c"}
         assert fake.calls == []
 
+    def test_a_picture_keeps_its_result_clean(self, monkeypatch):
+        # The proportions ppt_add_picture hands the check are not for the caller.
+        fake = FakePpt(facts(card("c", 900, 100, 100, 50)))
+        monkeypatch.setattr(layout_check, "ppt", fake)
+        assert report_layout({"shape_name": "c", "_natural_aspect": 1.5}, 1, ["c"]) == {
+            "shape_name": "c"}
+
     def test_nor_a_new_background(self, monkeypatch):
         fake = FakeDeck([slide(card("c", 10, 10, 50, 50), background="#333333")])
         monkeypatch.setattr(layout_check, "ppt", fake)
