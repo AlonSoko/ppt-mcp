@@ -2998,6 +2998,19 @@ class TestChartSampleData:
     def test_a_finished_chart_is_not(self):
         assert check(chart_shape(["Q1", "Q2"], [{"name": "Revenue", "values": [12.0, 30.0]}])) == []
 
+    QUARTERS = ("1st Qtr", "2nd Qtr", "3rd Qtr", "4th Qtr")
+
+    def test_a_real_chart_by_quarter_is_not(self):
+        # The pie's sample quarters are what real quarterly data is called too.
+        assert check(chart_shape(self.QUARTERS, [{"name": "Revenue",
+                                                  "values": [12.0, 30.0, 18.0, 25.0]}])) == []
+
+    def test_a_new_pie_is_reported_with_its_quarters(self):
+        [finding] = check(chart_shape(self.QUARTERS, [{"name": "Sales",
+                                                       "values": [8.2, 3.2, 1.4, 1.2]}]))
+        assert "categories named '1st Qtr'" in finding["message"]
+        assert "sample numbers" in finding["message"]
+
     def test_a_chart_whose_data_is_unknown_is_not_judged(self):
         assert check(shape("Chart 3", 100, 100, 500, 300, type=msoChart)) == []
 

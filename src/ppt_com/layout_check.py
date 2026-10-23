@@ -3481,7 +3481,10 @@ def _stretched(slide_index, shapes, slide_area=None):
 
 
 # The names PowerPoint gives a new chart's categories and series.
-_SAMPLE_CATEGORY = re.compile(r"^(?:Category \d+|[1-4](?:st|nd|rd|th) Qtr)$")
+_SAMPLE_CATEGORY = re.compile(r"^Category \d+$")
+# The pie's sample quarters are also what a real quarterly chart is called, so
+# they count only beside sample series or numbers.
+_SAMPLE_QUARTER = re.compile(r"^[1-4](?:st|nd|rd|th) Qtr$")
 _SAMPLE_SERIES = re.compile(r"^(?:Series \d+|Y Values)$")
 
 
@@ -3510,15 +3513,16 @@ def _chart_sample_data(slide_index, shapes):
         if samples is None:
             samples = _sample_values()
         left = []
-        categories = [c for c in chart.get("categories") or [] if _SAMPLE_CATEGORY.match(c or "")]
-        if categories:
-            left.append("categories named " + ", ".join(f"'{c}'" for c in categories[:4]))
         series = chart.get("series") or []
         names = [s.get("name") for s in series if _SAMPLE_SERIES.match(s.get("name") or "")]
-        if names:
-            left.append("series named " + ", ".join(f"'{n}'" for n in names[:3]))
         numbers = [s.get("name") for s in series
                    if tuple(round(v, 4) for v in s.get("values") or [] if v is not None) in samples]
+        categories = [c for c in chart.get("categories") or [] if _SAMPLE_CATEGORY.match(c or "")
+                      or ((names or numbers) and _SAMPLE_QUARTER.match(c or ""))]
+        if categories:
+            left.append("categories named " + ", ".join(f"'{c}'" for c in categories[:4]))
+        if names:
+            left.append("series named " + ", ".join(f"'{n}'" for n in names[:3]))
         if numbers:
             left.append("PowerPoint's sample numbers")
         if not left:
