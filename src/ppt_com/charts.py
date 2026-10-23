@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from utils.offload import run_offloaded
 from backend import ppt
+from ppt_com.layout_check import report_layout, touched_names
 from utils.color import hex_to_int, int_to_hex
 from utils.navigation import goto_slide
 from ppt_com.shape_lookup import resolve_shape
@@ -806,6 +807,7 @@ def add_chart(params: AddChartInput) -> str:
             params.slide_index, params.chart_type,
             params.left, params.top, params.width, params.height,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add chart: {str(e)}"})

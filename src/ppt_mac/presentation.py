@@ -31,6 +31,7 @@ from appscript import k, mactypes
 
 from backend.mac_ae import (
     EXPORT_STAGING_DIR,
+    staging_dir,
     count,
     elements,
     full_names as _full_names,
@@ -169,7 +170,7 @@ def _stage_template_copy(template_path: str) -> str:
     directory it is always allowed to read and write, and an unsandboxed
     Python process can reach it freely.
     """
-    os.makedirs(EXPORT_STAGING_DIR, exist_ok=True)
+    staging_dir(EXPORT_STAGING_DIR)
     stem, ext = os.path.splitext(os.path.basename(template_path))
     dest = os.path.join(EXPORT_STAGING_DIR, stem + ext)
     serial = 2
@@ -606,7 +607,7 @@ def _save_presentation_as_impl(
     #
     # A POSIX path, always. An HFS colon path is taken as a literal filename
     # and produces a file called "Macintosh HD:Users:..." in the container root.
-    os.makedirs(EXPORT_STAGING_DIR, exist_ok=True)
+    staging_dir(EXPORT_STAGING_DIR)
     staged = _free_staged_path(app, target)
     if "as_" not in kwargs:
         kwargs["as_"] = to_keyword(

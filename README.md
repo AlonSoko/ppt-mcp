@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <strong>Real-time PowerPoint control on Windows and macOS —<br>an MCP server with 156 tools for AI agents and developers.</strong>
+  <strong>Real-time PowerPoint control on Windows and macOS —<br>an MCP server with 157 tools for AI agents and developers.</strong>
 </p>
 
 ---
@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/178b9b5b-624d-4de0-a1dd-619dc13d4bd7
 ## ✨ Key Features
 
 - **Real-time control** — Directly manipulates a running PowerPoint instance; changes appear instantly on screen
-- **156 tools across 26 categories** — Slides, shapes, text, tables, charts, animations, SmartArt, media, freeform paths, and more
+- **157 tools across 26 categories** — Slides, shapes, text, tables, charts, animations, SmartArt, media, freeform paths, and more
 - **Safe for AI agents** — `ppt_activate_presentation` locks all tools to a specific file, preventing accidental edits to the wrong presentation
 - **[Google Material Symbols](https://fonts.google.com/icons) icons** — Search 2,500+ icons by keyword and insert as SVG with theme colors
 - **Theme color awareness** — Use `accent1`, `accent2`, etc. instead of hardcoded RGB values
@@ -44,7 +44,13 @@ https://github.com/user-attachments/assets/178b9b5b-624d-4de0-a1dd-619dc13d4bd7
 
 On macOS the server drives PowerPoint over Apple Events instead of COM. The
 first tool call raises the system's automation prompt, and PowerPoint has to be
-allowed there once. See [macOS support](#-macos-support) for what differs.
+allowed there once. Pictures, icons, templates, themes, previews and exports
+pass through PowerPoint's own folder, which macOS 14 and later keeps other apps
+out of, so the application that launches the server (Terminal, an editor,
+Claude) needs Full Disk Access for those tools. Run from a terminal, macOS may
+refuse without asking; the tools then say what to grant. Shapes, text, tables
+and charts work regardless. See [macOS support](#-macos-support) for what
+differs.
 
 ## 🚀 Getting Started
 
@@ -152,12 +158,12 @@ uv sync
 | **Media** | 3 | Video, audio, media settings |
 | **SmartArt** | 3 | Add, modify, list layouts |
 | **Edit Operations** | 6 | Undo and redo (on the target presentation), copy shapes/formatting between slides |
-| **Layout** | 7 | Align, distribute, slide size, background, flip, merge shapes |
+| **Layout** | 8 | Align, distribute, slide size, background, flip, merge shapes, layout check |
 | **Effects** | 3 | Glow and reflection (on the shape or on its text), soft edge |
 | **Comments** | 3 | Add, list, delete |
 | **Advanced** | 19 | Tags, fonts (set defaults + bulk replace), crop, picture format, shape export, visibility, selection, view, animation copy, picture from URL, SVG icons, icon search, aspect ratio lock, batch apply, default shape style |
 | **Freeform** | 7 | Build freeform paths, get/set node positions, insert/delete nodes, node editing type, segment type |
-| | **156** | |
+| | **157** | |
 
 ## 💡 Example Prompts
 
@@ -285,6 +291,27 @@ Modes can be combined: use a preset as a base and override specific slots. All a
 - **Auto-shrunk text** — text silently compressed by PowerPoint's shrink-to-fit feature
 
 Auto-fix strategies include widening text boxes and inserting soft returns.
+
+### 📐 Layout Check
+
+`ppt_check_layout` measures a slide, or the whole deck, and reports what is wrong as numbers rather than as a picture, so it works whether or not the model can read images:
+- **Off the slide** — a shape, or its text, reaching past a slide edge
+- **Overflow** — text that needs more room than its box gives it
+- **Overlap** — text running into another shape or into other text, text over a table's cells or hidden under a card laid over it, and anything a slide adds running into the template's own graphics: its logo, a band down the side, a footer line
+- **Low contrast** — text against what is behind it, below the WCAG minimum for its size, on a gradient too
+- **Cramped text** — text on a card pressed against one of its edges
+- **Narrow margin** — a shape closer to the side of the slide than the margin the rest of the slide keeps
+- **Misaligned** — edges a few points apart that were meant to line up
+- **Uneven spacing** — a row or column of like shapes with unequal gaps
+- **Uneven sizes** — like shapes in a row that are not one height, or in a column not one width, and a row with one card a little wider than the rest
+- **Sample text** — lorem ipsum, "Your title here", "[Company name]" or "XX%" left behind by a template or a draft
+- **Empty placeholders**, and, for the whole deck, **titles** that change size, position, alignment, weight, typeface or colour from slide to slide. A right-aligned title, as in a Hebrew or Arabic deck, is compared on its right edge
+
+Each issue names the shapes and says how to fix it, with the tool call and its values. A fix keeps the slide together rather than only clearing the issue: a card grows with its padding and the rest of its row, and a shape brought back onto the slide keeps the slide's margin. The tools that add, copy, move, resize, align, distribute or retext a shape, or fill a placeholder, also check the shape they touched and report any problem in their own result, under `layout_issues`, so it is caught by the call that caused it. A new slide background, or a new fill under text, reports the text it left hard to read, and a change to the whole deck, its theme, theme colours, fonts or slide size, reports what it broke that was not broken before.
+
+Each of those checks reads the slide back, which adds a moment to every write, more on the Mac. To leave the checking to `ppt_check_layout` alone, set `PPT_LAYOUT_CHECKS=off` in the server's `env`; the server's instructions then tell the model to run it after each few changes.
+
+On a deck made from a template, the template is part of the check. The graphics its slide master and layouts draw are read, so a chart sized over the logo or a footnote on the confidentiality line is reported, and what the template designed is taken as meant: a placeholder still in the theme's colours, or a caption layout's own smaller title, is not held to the rest, and in a deck on two designs each design's titles are compared only with each other. Theme colours set with `ppt_set_theme_colors` are the caller's, so that call judges the placeholders in them too, and so does every later check once the theme's own text colour no longer reads on its background. PowerPoint for Mac exposes the master's graphics but not a layout's own, so there a layout's design is allowed for through its placeholders.
 
 ## ⚙️ Advanced Configuration
 

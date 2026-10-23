@@ -17,6 +17,7 @@ from utils.navigation import goto_slide
 from utils.redraw import FrozenRedraw
 from utils.validation import font_size_warning
 from ppt_com.shape_lookup import resolve_shape, walk_group_children
+from ppt_com.layout_check import report_layout, touched_names
 from ppt_com.constants import (
     SHAPE_TYPE_NAMES,
     msoTrue, msoFalse, msoTriStateMixed,
@@ -1469,6 +1470,7 @@ def add_shape(params: AddShapeInput) -> str:
         warn = font_size_warning(params.font_size)
         if warn:
             result["warning"] = warn
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add shape: {str(e)}"})
@@ -1498,6 +1500,7 @@ def add_textbox(params: AddTextboxInput) -> str:
         warn = font_size_warning(params.font_size)
         if warn:
             result["warning"] = warn
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add textbox: {str(e)}"})
@@ -1522,6 +1525,7 @@ def add_picture(params: AddPictureInput) -> str:
             params.left, params.top, params.width, params.height,
             params.zorder,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to add picture: {str(e)}"})
@@ -1646,6 +1650,7 @@ def update_shape(params: UpdateShapeInput) -> str:
                 params.rotation, params.name, params.adjustments,
                 params.dleft, params.dtop, params.dwidth, params.dheight,
             )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to update shape: {str(e)}"})
@@ -1686,6 +1691,7 @@ def duplicate_shape(params: ShapeIdentifierInput) -> str:
             _duplicate_shape_impl,
             params.slide_index, params.shape_name, params.shape_index,
         )
+        report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)
     except Exception as e:
         return json.dumps({"error": f"Failed to duplicate shape: {str(e)}"})
