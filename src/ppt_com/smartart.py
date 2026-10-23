@@ -9,11 +9,11 @@ import json
 import logging
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from utils.offload import run_offloaded
 from backend import ppt
-from utils.color import hex_to_int
+from utils.color import check_hex, hex_to_int
 from utils.navigation import goto_slide
 from utils.validation import font_size_warning
 from ppt_com.constants import msoSmartArt, SHAPE_TYPE_NAMES, msoTrue, msoFalse
@@ -248,6 +248,11 @@ class AddSmartArtInput(BaseModel):
         default=None,
         description="Text color for all nodes as '#RRGGBB'. E.g. '#FFFFFF' for white.",
     )
+
+    @field_validator("font_color")
+    @classmethod
+    def validate_colours(cls, value):
+        return check_hex(value)
 
 
 class ModifySmartArtInput(BaseModel):

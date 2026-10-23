@@ -8,10 +8,10 @@ import json
 import logging
 from typing import Literal, Optional, Union
 
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from utils.offload import run_offloaded
-from utils.color import hex_to_int, int_to_hex
+from utils.color import check_hex, hex_to_int, int_to_hex
 from backend import ppt
 from utils.navigation import goto_slide
 from utils.redraw import FrozenRedraw
@@ -170,6 +170,14 @@ ZORDER_FIELD_DESCRIPTION = (
 )
 
 
+# What to pass instead of a colour, for a caller that wants none.
+_NO_COLOUR = {
+    "line_color": "For no border, pass line_visible=false.",
+    "fill_color": "For no fill, pass fill_type='none'.",
+    "fill_color2": "For no fill, pass fill_type='none'.",
+}
+
+
 class AddShapeInput(BaseModel):
     """Input for adding an auto shape to a slide."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
@@ -286,6 +294,11 @@ class AddShapeInput(BaseModel):
             )
         return self
 
+    @field_validator("font_color", "fill_color", "fill_color2", "line_color")
+    @classmethod
+    def validate_colours(cls, value, info):
+        return check_hex(value, _NO_COLOUR.get(info.field_name, ""))
+
 
 class AddTextboxInput(BaseModel):
     """Input for adding a text box to a slide."""
@@ -324,6 +337,11 @@ class AddTextboxInput(BaseModel):
     zorder: Literal["front", "back", "behind_text"] = Field(
         default="front", description=ZORDER_FIELD_DESCRIPTION
     )
+
+    @field_validator("font_color")
+    @classmethod
+    def validate_colours(cls, value):
+        return check_hex(value)
 
 
 class AddPictureInput(BaseModel):
