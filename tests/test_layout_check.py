@@ -3317,6 +3317,28 @@ class TestATitleOffItsLayout:
         slides = [self.page(4, "Cover", left=200.0)]
         assert layout_check._titles_off_their_layout(slides) == []
 
+    def grown(self, words, left=40.0):
+        page = self.page(4, "Section", left=left, home=(40.0, 30.0, 880.0, 56.0))
+        title = page["shapes"][0]
+        title["height"], title["text"]["height"] = 65.2, words
+        return page
+
+    def test_a_title_grown_to_hold_its_words_is_left_taller(self):
+        # The overflow fix grew it from 56 to 65.2 pt; putting it back spilled
+        # the words again, and the two findings took turns.
+        page = self.grown(58)
+        assert [f["type"] for f in slide_findings(page, W, H) if f["type"] == "overflow"] == []
+        assert layout_check._titles_off_their_layout([page]) == []
+
+    def test_a_grown_title_that_also_moved_keeps_its_height(self):
+        [finding] = layout_check._titles_off_their_layout([self.grown(58, left=44.0)])
+        assert "height" not in finding["message"]
+        assert finding["fix"].endswith("left=40 top=30 width=880 height=65.2).")
+
+    def test_a_title_grown_past_its_words_is_reported(self):
+        [finding] = layout_check._titles_off_their_layout([self.grown(30)])
+        assert finding["fix"].endswith("height=56).")
+
 
 def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
     from utils.package import layout_facts

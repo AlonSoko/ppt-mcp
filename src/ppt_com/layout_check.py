@@ -3001,17 +3001,20 @@ def _shortens(shape, by, edge):
     """
     if not paints_box(shape) and (_text_anchor(shape) or (None, None))[1] != edge:
         return False
+    return not _spills_at(shape, shape["width"], shape["height"] - by)
+
+
+def _spills_at(shape, width, height):
+    """Whether the text in ``shape`` would spill out of a box this size."""
     text = shape.get("text")
     if not text or not text.get("chars"):
-        return True
+        return False
     from ppt_com.text import build_measurement
 
-    measurement = build_measurement(
-        [], text.get("width"), text.get("height"),
-        shape["width"], shape["height"] - by, text.get("margins"),
+    return build_measurement(
+        [], text.get("width"), text.get("height"), width, height, text.get("margins"),
         text.get("word_wrap"), text.get("autofit"), text.get("orientation"),
-    )
-    return not measurement["overflows"]
+    )["overflows"]
 
 
 # Text a template or a draft leaves for someone to replace. The words in any
@@ -3959,6 +3962,11 @@ def _titles_off_their_layout(slides):
         if title is None:
             continue
         now = [title["left"], title["top"], title["width"], title["height"]]
+        home = list(home)
+        if title["height"] > home[3] and _spills_at(title, home[2], home[3]):
+            # Grown to hold its words: the layout's box would spill them, and
+            # putting it back undoes the overflow fix.
+            home[3] = title["height"]
         off = [abs(a - b) for a, b in zip(now, home, strict=True)]
         if max(off) <= _ALIGNED or max(off) > _LAYOUT_SLIP:
             continue
