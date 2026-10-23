@@ -1585,3 +1585,28 @@ class TestPictureProportions:
         result, pic = placed(300, 300)
         assert pic.lock_aspect_ratio() is False
         assert (result["width"], result["height"]) == (300, 300)
+
+
+def _rgba_png(width, height, pixel):
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    rows = b"".join(b"\x00" + b"".join(bytes(pixel(x, y)) for x in range(width))
+                    for y in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+@macos_only
+class TestPhotoSamples:
+    def test_a_see_through_part_is_not_black(self):
+        # It was judged as black, so dark text on a logo's clear ground on a
+        # white slide was reported as unreadable.
+        from ppt_mac.layout_check import _sample_image
+
+        image = _rgba_png(4, 2, lambda x, y: (200, 30, 30, 255) if x < 2 else (0, 0, 0, 0))
+        grid = _sample_image(image, 2.0, columns=4)
+        assert grid["colours"][:4] == ["#C81E1E", "#C81E1E", None, None]

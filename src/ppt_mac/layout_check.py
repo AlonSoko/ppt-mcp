@@ -690,6 +690,8 @@ def _photo_samples_impl(slide_index, names):
             with open(staged, "rb") as image:
                 sampled = _sample_image(image.read(), shape.width() / max(shape.height(), 1))
             if sampled:
+                # A flipped or half-turned picture comes out as the slide
+                # shows it (checked live), so the sample needs no turning.
                 found[name] = sampled
         except Exception:
             logger.debug("Cannot export '%s'", name, exc_info=True)
@@ -723,6 +725,19 @@ def _sample_image(data, aspect, columns=96):
     Quartz.CGContextDrawImage(context, Quartz.CGRectMake(0, 0, columns, rows), image)
     pixels = Quartz.CGBitmapContextGetData(context)
     raw = bytes(pixels.as_buffer(columns * rows * 4))
-    colours = [f"#{raw[i]:02X}{raw[i + 1]:02X}{raw[i + 2]:02X}"
-               for i in range(0, len(raw), 4)]
-    return {"columns": columns, "rows": rows, "colours": colours}
+    return {"columns": columns, "rows": rows, "colours": _colours(raw)}
+
+
+def _colours(raw):
+    """Premultiplied RGBA bytes as colours, None where the image is see-through:
+    what shows there is whatever is under the picture, not black."""
+    colours = []
+    for i in range(0, len(raw), 4):
+        alpha = raw[i + 3]
+        if alpha < 128:
+            colours.append(None)
+            continue
+        colours.append("#" + "".join(f"{min(255, round(raw[i + c] * 255 / alpha)):02X}"
+                                     for c in range(3)))
+    return colours
+

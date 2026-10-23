@@ -3724,6 +3724,12 @@ class TestTextOnAPhoto:
         page["shapes"].append(backing)
         assert slide_findings(page, W, H) == []
 
+    def test_a_see_through_part_of_a_picture_is_not_judged(self):
+        page = self.photo_slide((200, 220, 240), (40, 40, 40))
+        photo = page["shapes"][0]["photo"]
+        photo["colours"] = [None] * len(photo["colours"])
+        assert slide_findings(page, W, H) == []
+
     def test_a_photo_never_sampled_is_not_judged(self):
         page = self.photo_slide((200, 220, 240), (40, 40, 40))
         del page["shapes"][0]["photo"]

@@ -1967,7 +1967,9 @@ def _photo_contrast(slide_index, shape, picture, theme_colors=None):
             continue
         for c in range(columns):
             x = box[0] + (c + 0.5) * _width(box) / columns
-            if words[0] <= x <= words[2]:
+            # A see-through pixel shows what is under the picture, which the
+            # sample does not hold.
+            if words[0] <= x <= words[2] and photo["colours"][r * columns + c]:
                 behind.append(photo["colours"][r * columns + c])
     if len(behind) < 4:
         return None
