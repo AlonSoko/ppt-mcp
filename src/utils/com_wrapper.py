@@ -783,10 +783,22 @@ class PowerPointCOMWrapper:
         it cannot be read."""
         try:
             import win32process
-
-            return win32process.GetWindowThreadProcessId(self._app.HWND)[1]
-        except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+        except ImportError:
             return None
+        # The application's own handle first; a window's when it has none,
+        # which PowerPoint can answer right after it starts.
+        for handle in (
+            lambda: self._app.HWND,
+            lambda: self._app.ActiveWindow.HWND,
+            lambda: self._app.Windows(1).HWND,
+        ):
+            try:
+                hwnd = handle()
+                if hwnd:
+                    return win32process.GetWindowThreadProcessId(hwnd)[1]
+            except Exception:  # noqa: BLE001 - try the next way of asking
+                logger.debug("Could not read a window handle", exc_info=True)
+        return None
 
     def _still_ours(self) -> bool:
         """Whether the PowerPoint held now is the one this server started.
@@ -857,6 +869,10 @@ class PowerPointCOMWrapper:
             # Only force visibility when we ourselves started PowerPoint.
             # Don't yank a user-hidden running instance to the foreground.
             self._app.Visible = True
+
+        if self._launched_by_us and self._launched_pid is None:
+            # PowerPoint has no window to ask about until it is visible.
+            self._launched_pid = self._app_pid()
 
         return self._app
 

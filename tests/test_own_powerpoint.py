@@ -112,6 +112,38 @@ class TestMacKnowsWhichPowerPointItStarted:
         assert wrapper._still_ours() is False
 
 
+class TestWindowsReadsTheProcessIdFromAWindow:
+    def _wrapper(self, monkeypatch, app, pid=4242):
+        import sys
+        from utils.com_wrapper import PowerPointCOMWrapper
+
+        process = MagicMock()
+        process.GetWindowThreadProcessId.side_effect = lambda hwnd: (0, pid + hwnd)
+        monkeypatch.setitem(sys.modules, "win32process", process)
+        wrapper = PowerPointCOMWrapper()
+        wrapper._app = app
+        return wrapper
+
+    def test_the_application_handle_is_used_first(self, monkeypatch):
+        app = MagicMock(HWND=1)
+        assert self._wrapper(monkeypatch, app)._app_pid() == 4243
+
+    def test_a_window_answers_when_the_application_has_no_handle(self, monkeypatch):
+        class App:
+            @property
+            def HWND(self):
+                raise AttributeError("HWND")
+
+            ActiveWindow = MagicMock(HWND=2)
+
+        assert self._wrapper(monkeypatch, App())._app_pid() == 4244
+
+    def test_a_zero_handle_is_not_an_answer(self, monkeypatch):
+        app = MagicMock(HWND=0, ActiveWindow=MagicMock(HWND=0))
+        app.Windows.side_effect = RuntimeError("no window")
+        assert self._wrapper(monkeypatch, app)._app_pid() is None
+
+
 class TestWindowsKnowsWhichPowerPointItStarted:
     def _wrapper(self, started_pid, now_pid, ours=True):
         from utils.com_wrapper import PowerPointCOMWrapper
