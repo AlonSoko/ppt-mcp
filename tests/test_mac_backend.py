@@ -1112,3 +1112,31 @@ class TestWorkGoesAwayWithTheCallerThatQueuedIt:
         release.set()
         assert took, "the caller never returned"
         assert took[0] < 2.0, f"freed only after {took[0]:.1f}s, budget was 30s"
+
+
+@macos_only
+class TestTheSuiteStaysOffTheRealPowerPoint:
+    """A test that reaches PowerPoint is stopped by conftest, not obeyed.
+
+    The COM tests of ppt_undo once sent a real Undo to the decks open on the
+    machine running the suite, because on macOS the Apple Event impl takes
+    the COM one's place and talks to the application itself.
+    """
+
+    def test_connecting_is_refused_and_says_why(self):
+        from backend.mac_ae import PowerPointAppleEventWrapper
+
+        with pytest.raises(RuntimeError, match="reached for the real PowerPoint"):
+            PowerPointAppleEventWrapper()._connect_impl(allow_launch=False)
+
+    def test_the_undo_tool_cannot_reach_it_either(self):
+        import ppt_com.edit_ops as edit_ops
+        from backend.mac_ae import PowerPointAppleEventWrapper
+
+        wrapper = PowerPointAppleEventWrapper()
+        wrapper.start()
+        try:
+            with pytest.raises(RuntimeError, match="reached for the real PowerPoint"):
+                wrapper.execute(edit_ops._undo_impl, 1)
+        finally:
+            wrapper.stop()
