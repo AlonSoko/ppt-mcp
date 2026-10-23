@@ -6,14 +6,41 @@ operating system gives up. A download that cannot get through says which
 host it tried and, for the icon set, which setting points it elsewhere.
 """
 
+import http.client
+import logging
+import math
 import os
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TIMEOUT = 15.0
+
+
+def _timeout_from_env():
+    """PPT_DOWNLOAD_TIMEOUT in seconds, or the default when it is not a
+    positive number. Read at import, so a bad value must not stop the server."""
+    raw = os.getenv("PPT_DOWNLOAD_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "PPT_DOWNLOAD_TIMEOUT=%r is not a positive number of seconds; using %g",
+            raw, _DEFAULT_TIMEOUT,
+        )
+        return _DEFAULT_TIMEOUT
+    return value
+
+
 # Seconds to wait for a server to answer. PPT_DOWNLOAD_TIMEOUT changes it.
-DOWNLOAD_TIMEOUT = float(os.getenv("PPT_DOWNLOAD_TIMEOUT", "15"))
+DOWNLOAD_TIMEOUT = _timeout_from_env()
 
 
 def open_url(url, what, setting=None, method=None, timeout=None):
@@ -26,23 +53,24 @@ def open_url(url, what, setting=None, method=None, timeout=None):
     A ``file://`` address that names no file is a 404, so a local copy of
     the icon set behaves like the real one.
     """
+    limit = timeout or DOWNLOAD_TIMEOUT
     request = urllib.request.Request(url, method=method) if method else url
     try:
-        return urllib.request.urlopen(request, timeout=timeout or DOWNLOAD_TIMEOUT)
+        return urllib.request.urlopen(request, timeout=limit)
     except urllib.error.HTTPError:
         raise
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, FileNotFoundError):
             raise urllib.error.HTTPError(url, 404, "No such file", None, None) from None
-        raise ConnectionError(_unreachable(url, what, setting, exc.reason)) from None
-    except (socket.timeout, TimeoutError, OSError) as exc:
-        raise ConnectionError(_unreachable(url, what, setting, exc)) from None
+        raise ConnectionError(_unreachable(url, what, setting, exc.reason, limit)) from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise ConnectionError(_unreachable(url, what, setting, exc, limit)) from None
 
 
-def _unreachable(url, what, setting, reason):
+def _unreachable(url, what, setting, reason, limit):
     host = urllib.parse.urlsplit(url).netloc or url
     if isinstance(reason, (socket.timeout, TimeoutError)):
-        reason = f"no answer within {DOWNLOAD_TIMEOUT:g} s"
+        reason = f"no answer within {limit:g} s"
     message = f"Could not reach {host} to {what} ({reason})."
     if setting:
         message += (

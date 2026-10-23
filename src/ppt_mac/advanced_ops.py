@@ -79,7 +79,6 @@ from ppt_com.constants import (
     msoShapeRectangle,
 )
 from ppt_mac.export import _staging_path
-from utils.download import open_url
 from ppt_mac.layout import _NO_SHAPE_RANGE
 from ppt_mac.shapes import (
     _WIN_AUTO_SHAPE_TYPE,
@@ -90,6 +89,7 @@ from ppt_mac.shapes import (
     _win_constant,
 )
 from utils.color import hex_to_rgb_list, rgb_list_to_hex
+from utils.download import open_url
 from utils.navigation import goto_slide
 
 from ppt_mac.shapes import place_in_zorder

@@ -345,7 +345,7 @@ ESCは変更を確定せずにキャンセルするため、意図しない操�
 |---|---|---|
 | `PPT_ICON_BASE_URL` | `https://cdn.jsdelivr.net/npm/@material-symbols/svg-400@0.31.3` | アイコンの取得元。パッケージと同じ構成（`<base>/outlined/home.svg`）であれば使えます。`https://unpkg.com/@material-symbols/svg-400@0.31.3` のようなミラー、またはパッケージのローカルコピー（`file:///path/to/svg-400`）。 |
 | `PPT_ICON_METADATA_URL` | `https://fonts.google.com/metadata/icons` | アイコン一覧の取得元。このページを一度保存し、そのコピー（`file:///path/to/icons.json`）を指定します。 |
-| `PPT_DOWNLOAD_TIMEOUT` | `15` | サーバーの応答を待つ秒数。 |
+| `PPT_DOWNLOAD_TIMEOUT` | `15` | サーバーの応答を待つ秒数。正の数でない値は無視され、15 になります。 |
 
 ```json
 {

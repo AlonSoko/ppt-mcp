@@ -176,6 +176,51 @@ class TestTheSettings:
         ]
 
 
+    @pytest.mark.parametrize("bad", ["abc", "", "0", "-3", "nan", "inf"])
+    def test_a_bad_timeout_falls_back_to_the_default(self, bad):
+        assert self._read(PPT_DOWNLOAD_TIMEOUT=bad)[-1] == "15.0"
+
+
+class TestTheTimeInTheMessage:
+    def test_it_is_the_one_the_caller_asked_for(self, monkeypatch):
+        monkeypatch.setattr(download.urllib.request, "urlopen",
+                            _refusing(socket.timeout("timed out")))
+        with pytest.raises(ConnectionError, match="no answer within 5 s"):
+            download.open_url("https://example.test/a.svg", "check an icon", timeout=5)
+
+    def test_an_incomplete_read_is_a_connection_error(self, monkeypatch):
+        import http.client
+
+        monkeypatch.setattr(download.urllib.request, "urlopen",
+                            _refusing(http.client.IncompleteRead(b"")))
+        with pytest.raises(ConnectionError, match="Could not reach example.test"):
+            download.open_url("https://example.test/a.svg", "download the icon")
+
+
+class TestAnIconNameIsAName:
+    def _model(self, **kwargs):
+        from ppt_com.advanced_ops import AddSvgIconInput
+
+        return AddSvgIconInput(slide_index=1, **kwargs)
+
+    @pytest.mark.parametrize("name", ["../x", "a/b", "bolt.svg", "Bolt", "a b", ""])
+    def test_a_path_is_refused(self, name):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._model(icon_name=name)
+
+    def test_real_names_pass(self):
+        assert self._model(icon_name="auto_awesome").icon_name == "auto_awesome"
+        assert self._model(icon_name="123", style="sharp").style == "sharp"
+
+    def test_the_style_is_one_of_the_three(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._model(icon_name="bolt", style="../outlined")
+
+
 class TestTheToolSaysSo:
     def test_a_search_on_a_network_that_blocks_google_fonts(self, monkeypatch):
         from ppt_com import advanced_ops

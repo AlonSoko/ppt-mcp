@@ -52,6 +52,7 @@ _ICON_CACHE_TTL = 86400   # 24 hours
 # reach the fetch at once.  The lock keeps that to a single network call.
 _icon_cache_lock = threading.Lock()
 
+
 def _fetch_icon_metadata():
     """Fetch and cache the Material Symbols icon metadata from Google Fonts.
 
@@ -515,6 +516,7 @@ class AddSvgIconInput(BaseModel):
     slide_index: int = Field(..., ge=1, description="1-based slide index")
     icon_name: str = Field(
         ...,
+        pattern=r"^[a-z0-9_]+$",
         description=(
             "Material Symbols icon name (e.g. 'bolt', 'description', 'extension', "
             "'settings', 'home', 'search', 'favorite'). "
@@ -533,7 +535,7 @@ class AddSvgIconInput(BaseModel):
             "Default: 'accent1' (the presentation's main accent color)."
         ),
     )
-    style: str = Field(
+    style: Literal["outlined", "rounded", "sharp"] = Field(
         default="outlined",
         description="Icon style: 'outlined', 'rounded', or 'sharp'",
     )
