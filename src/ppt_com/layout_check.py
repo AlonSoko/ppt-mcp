@@ -5089,8 +5089,36 @@ def _installed_fonts_impl():
         for family in os.listdir(cloud):
             names.add(family)
             names |= names_in_folder(os.path.join(cloud, family))
-    _FONTS["installed"] = frozenset(n.lower() for n in names if n)
+    # Windows lists a family by the name of its own language only: 游ゴシック is
+    # "Yu Gothic" on an English Windows, and a deck made in Japan asks for the
+    # first. The files hold both.
+    _FONTS["installed"] = FontNames(names, (
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")))
     return _FONTS["installed"]
+
+
+class FontNames(frozenset):
+    """The installed fonts' names, lower case. One not among them is looked
+    for in the font files of ``folders``, read once and only then."""
+
+    def __new__(cls, names, folders=()):
+        found = super().__new__(cls, (n.lower() for n in names if n))
+        found.folders = tuple(folders)
+        found.other_names = None
+        return found
+
+    def __contains__(self, name):
+        if frozenset.__contains__(self, name):
+            return True
+        if self.other_names is None:
+            from utils import fonts
+
+            read = set()
+            for folder in self.folders:
+                read |= fonts.names_in_folder(folder)
+            self.other_names = frozenset(n.lower() for n in read if n)
+        return name in self.other_names
 
 
 def _with_fonts(slides, installed):

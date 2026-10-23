@@ -3206,10 +3206,49 @@ class TestFonts:
         assert slide_findings(page, W, H) == []
 
 
-class TestFontNames:
-    def test_a_font_files_names_are_read(self):
-        from utils.fonts import font_names
+class TestOtherFontNames:
+    def test_a_name_the_system_list_leaves_out_is_found_in_the_font_files(self, monkeypatch):
+        # A deck made in Japan asks for 游ゴシック, which an English Windows
+        # lists as Yu Gothic; Japanese Macs name Hiragino the same way.
+        from utils import fonts
 
+        folders = []
+
+        def names_in_folder(folder):
+            folders.append(folder)
+            return {"游ゴシック", "Yu Gothic"} if folder == "fonts" else set()
+
+        monkeypatch.setattr(fonts, "names_in_folder", names_in_folder)
+        installed = layout_check.FontNames({"Yu Gothic"}, ("fonts", "more fonts"))
+        assert "yu gothic" in installed and folders == []
+        assert "游ゴシック" in installed
+        assert "no such font" not in installed
+        assert folders == ["fonts", "more fonts"]
+
+    def test_only_the_name_table_is_read(self, tmp_path):
+        from utils.fonts import file_names
+
+        class Counted:
+            def __init__(self, data):
+                self.data, self.at, self.read_bytes = data, 0, 0
+
+            def seek(self, at):
+                self.at = at
+
+            def read(self, length):
+                self.read_bytes += length
+                return self.data[self.at:self.at + length]
+
+        data = TestFontNames.font_file()
+        padded = data + b"\0" * 1_000_000
+        handle = Counted(padded)
+        assert file_names(handle) == {"Calibri Light", "Calibri"}
+        assert handle.read_bytes < 1000
+
+
+class TestFontNames:
+    @staticmethod
+    def font_file():
         def record(name_id, text):
             return struct.pack(">HHHHHH", 3, 1, 0x409, name_id, len(text.encode("utf-16-be")), 0), text.encode("utf-16-be")
 
@@ -3219,8 +3258,12 @@ class TestFontNames:
             entries.append(head[:10] + struct.pack(">H", len(strings)))
             strings += raw
         table = struct.pack(">HHH", 0, len(entries), 6 + 12 * len(entries)) + b"".join(entries) + strings
-        font = struct.pack(">IHHHH", 0x00010000, 1, 0, 0, 0) + b"name" + struct.pack(">III", 0, 28, len(table)) + table
-        assert font_names(font) == {"Calibri Light", "Calibri"}
+        return struct.pack(">IHHHH", 0x00010000, 1, 0, 0, 0) + b"name" + struct.pack(">III", 0, 28, len(table)) + table
+
+    def test_a_font_files_names_are_read(self):
+        from utils.fonts import font_names
+
+        assert font_names(self.font_file()) == {"Calibri Light", "Calibri"}
 
 
 class TestTitleCapitals:

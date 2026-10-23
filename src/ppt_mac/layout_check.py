@@ -582,6 +582,7 @@ def _installed_fonts_impl():
 
     from AppKit import NSFontManager
 
+    from ppt_com.layout_check import FontNames
     from utils.fonts import names_in_folder
 
     names = set()
@@ -598,8 +599,13 @@ def _installed_fonts_impl():
         for family in os.listdir(cloud):
             names.add(family)
             names |= names_in_folder(os.path.join(cloud, family))
-    _FONTS["installed"] = frozenset(n.lower() for n in names if n)
+    # The system's list names a font once; the files hold the names a deck
+    # made elsewhere asks for it by: "ヒラギノ角ゴシック W3" and "Hiragino Kaku
+    # Gothic ProN W3" for what it lists as "Hiragino Sans".
+    _FONTS["installed"] = FontNames(
+        names, ("/System/Library/Fonts", "/Library/Fonts", os.path.expanduser("~/Library/Fonts")))
     return _FONTS["installed"]
+
 
 
 def _saved_layout(pres, slide_index, cache):
