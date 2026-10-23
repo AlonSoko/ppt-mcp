@@ -214,7 +214,8 @@ def staging_dir(folder: Optional[str] = None) -> str:
             "only enter it with the user's consent. Give the app that started this "
             "server, such as Terminal, iTerm, VS Code or Claude, Full Disk Access in "
             "System Settings > Privacy & Security > Full Disk Access, then try again. "
-            "Shapes, text, tables and charts work without it."
+            "Shapes, text, tables and charts work without it. "
+            f"(The error was: {e})"
         ) from e
     return folder
 

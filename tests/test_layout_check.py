@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, "src")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
@@ -1725,6 +1725,8 @@ class TestSampleText:
         ("Click to add text", "Click to add"),
         ("Your title here", "Your title"),
         ("Prepared for [Client name]", "[Client name]"),
+        ("Intro\nYour company here", "Your company"),
+        ("[Insert date]", "[Insert date]"),
         ("Revenue grew XX% this year", "XX%"),
         ("Margin of XX.X points", "XX.X"),
     ])
@@ -1737,7 +1739,9 @@ class TestSampleText:
 
     @pytest.mark.parametrize("words", [
         "Super Bowl XX", "Sizes up to XXL", "See note [1]", "Our text here is final",
-        "The name of the game",
+        "The name of the game", "Grow your company", "Protect your image online",
+        "Keep your content fresh", "[Number of users]", "[Name 2020]",
+        "Your company is growing",
     ])
     def test_real_text_is_not(self, words):
         box = textbox("t", 100, 100, 400, 40)
@@ -2444,9 +2448,11 @@ class TestTheSetting:
     def test_off(self, value):
         assert layout_check._check_each_write(value) is False
 
-    def test_anything_else_is_refused_by_name(self):
-        with pytest.raises(ValueError, match="PPT_LAYOUT_CHECKS='of' is not a setting; use 'on'"):
-            layout_check._check_each_write("of")
+    def test_anything_else_is_on_and_says_so(self, caplog):
+        # Read at import: a typo must not stop the server from starting.
+        with caplog.at_level("WARNING"):
+            assert layout_check._check_each_write("of") is True
+        assert "PPT_LAYOUT_CHECKS='of' is not a setting; use 'on'" in caplog.text
 
     def test_the_instructions_follow_it(self):
         source = (Path(__file__).parent.parent / "src" / "server.py").read_text(encoding="utf-8")
@@ -2533,3 +2539,21 @@ class TestARowIntoADecoration:
                                        "shape_names=['c0', 'c1', 'c2'] width=208.67")
         assert "'c2' with what is on it left by 34.7 pt (ppt_update_shape shape_names=['c2', 'label2']" in found["fix"]
         assert found["fix"].endswith("The gaps stay 20 pt.")
+
+
+class TestWhatCannotBeReadDoesNotFailTheSlide:
+    def test_a_shape_that_cannot_be_described_is_left_out(self):
+        def geometry(ref, z):
+            if ref == "odd":
+                raise RuntimeError("PowerPoint will not say")
+            return {"name": ref, "z": z}
+
+        kept = layout_check.read_shapes(["a", "odd", "b"], geometry,
+                                        lambda facts, ref, full: facts, None)
+        assert [s["name"] for s in kept] == ["a", "b"]
+        assert [s["z"] for s in kept] == [1, 3]
+
+    def test_the_commonest_font_is_the_same_every_time(self):
+        assert layout_check._commonest(["B", "A", "B", "A"]) == "B"
+        assert layout_check._commonest(["A", "B", "B", "A"]) == "A"
+        assert layout_check._commonest([]) is None

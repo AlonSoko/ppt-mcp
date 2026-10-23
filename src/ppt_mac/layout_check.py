@@ -293,7 +293,10 @@ def _geometry_facts(shape, record, z):
 def _read_appearance(facts, shape, full):
     """Add what the shape draws: its fill, and its text."""
     if facts["type"] != msoGroup:
-        facts["fill"] = _fill_facts(shape)
+        try:
+            facts["fill"] = _fill_facts(shape)
+        except Exception:
+            logger.debug("Cannot read the fill of '%s'", facts["name"], exc_info=True)
     if facts.get("_has_text_frame"):
         try:
             facts["text"] = _text_facts(shape, full)

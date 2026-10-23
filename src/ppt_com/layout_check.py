@@ -54,9 +54,11 @@ def _check_each_write(value):
         return True
     if value in ("off", "false", "0", "no"):
         return False
-    raise ValueError(
-        f"PPT_LAYOUT_CHECKS={value!r} is not a setting; use 'on' (the default), "
-        "or 'off' to leave the checks to ppt_check_layout")
+    # Read at import, so a typo must not stop the server from starting.
+    logger.warning(
+        "PPT_LAYOUT_CHECKS=%r is not a setting; use 'on' (the default), or 'off' "
+        "to leave the checks to ppt_check_layout. Using 'on'.", value)
+    return True
 
 
 # Each check reads the slide back, which costs a call per write, and on the Mac
@@ -2556,15 +2558,17 @@ def _narrow_margins(slide_index, layout, slide_w):
 
 
 # Text a template or a draft leaves for someone to replace. The words in any
-# case. Stand-in figures only in capitals and only with a currency sign, a
+# case. "Your title" and its kind only as a line of their own, and a bracketed
+# stand-in only when it is nothing but the stand-in, so that "Grow your
+# company" and "[Number of users]" are text. Stand-in figures only in capitals and only with a currency sign, a
 # decimal point or a unit, so that neither a word nor a Roman numeral is one.
 _SAMPLE_WORDS = re.compile(
     r"lorem\s+ipsum|click\s+to\s+(?:add|edit)\b"
-    r"|\b(?:your|insert)\s+(?:text|title|name|company|logo|content|subtitle|tagline"
-    r"|caption|image|photo|picture)\b"
+    r"|(?<![^\n])(?:your|insert)\s+(?:text|title|name|company|logo|content|subtitle|tagline"
+    r"|caption|image|photo|picture)\b(?=(?:\s+here)?[ \t]*(?:\n|$))"
     r"|(?:^|\n)\s*(?:add\s+)?(?:text|title|subtitle|caption|content)\s+(?:goes\s+)?here\b"
-    r"|\[[^\]\n]{0,40}\b(?:insert|your|name|date|title|company|client|logo|image"
-    r"|placeholder|amount|number)\b[^\]\n]{0,40}\]",
+    r"|\[\s*(?:(?:insert|your)\s+)?(?:(?:company|client|project|presentation|document)\s+)?"
+    r"(?:name|date|title|subtitle|tagline|logo|image|text|amount|number)\s*\]",
     re.IGNORECASE,
 )
 _SAMPLE_FIGURES = re.compile(
@@ -2593,8 +2597,8 @@ def _sample_text(slide_index, shapes):
             slide_index, "sample_text", [name],
             f"'{name}' still has stand-in text: \"{found.group(0)}\".",
             f"Replace it with the real content (ppt_find_replace_text, or "
-            f"ppt_set_text for all of '{name}'), or delete the shape if it is "
-            "not needed.",
+            f"ppt_set_text for all of '{name}'). If '{name}' is not needed, say "
+            "so before deleting it: it may be text the slide does want.",
             severity="warning", sample=found.group(0),
         ))
     return findings
@@ -3012,13 +3016,19 @@ def _title_weight(title):
 def _title_font(title):
     fonts = [run["font"] for run in (title.get("text") or {}).get("runs") or []
              if run.get("font")]
-    return max(set(fonts), key=fonts.count) if fonts else None
+    return _commonest(fonts)
+
+
+def _commonest(values):
+    """The value that comes up most; the first of those that tie, so that the
+    same deck gives the same answer every time."""
+    return max(dict.fromkeys(values), key=values.count) if values else None
 
 
 def _title_colour(title):
     colours = [run["color_hex"].upper() for run in (title.get("text") or {}).get("runs") or []
                if run.get("color_hex")]
-    return max(set(colours), key=colours.count) if colours else None
+    return _commonest(colours)
 
 
 def _title_differences(label, entries, as_words, as_call, held=None, tool="ppt_format_text"):
@@ -3358,7 +3368,16 @@ def read_shapes(refs, geometry, appearance, detail):
     With names, those shapes are read in full first, and then the others
     only where they meet one of them; the rest stay geometry.
     """
-    shapes = [geometry(ref, z) for z, ref in enumerate(refs, start=1)]
+    # A shape PowerPoint will not describe is left out, not allowed to fail the
+    # whole slide.
+    shapes, readable = [], []
+    for z, ref in enumerate(refs, start=1):
+        try:
+            shapes.append(geometry(ref, z))
+            readable.append(ref)
+        except Exception:
+            logger.debug("Cannot read shape %d", z, exc_info=True)
+    refs = readable
     if detail is None:
         for facts, ref in zip(shapes, refs, strict=True):
             appearance(facts, ref, True)
@@ -3615,6 +3634,8 @@ def check_layout(params: CheckLayoutInput) -> str:
         for index in indices:
             facts = ppt.execute(_slide_facts_impl, [index], len(indices) == 1, None, cache)
             slides += facts["slides"]
+        if facts is None:  # a deck with no slides
+            return json.dumps({"issues": [], "total": 0, "slides_checked": 0})
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
         findings = []
         for slide in slides:
