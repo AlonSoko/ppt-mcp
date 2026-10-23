@@ -3575,15 +3575,16 @@ def _fonts(slide_index, shapes, theme_fonts=None):
         fonts = {run.get("font") for run in text.get("runs") or [] if run.get("font")}
         drawn = text.get("script_font")
         themed = theme_fonts or {}
-        # The theme's own pair, a Latin font and a right-to-left one, is its
-        # design: nobody asked for the Latin font by name.
-        # A theme that names no right-to-left font leaves it to PowerPoint's
-        # default for the script, which is then the theme's choice as well.
-        by_theme = (fonts and fonts <= set(themed.get("latin") or ())
-                    and (drawn in set(themed.get("script") or ()) or not themed.get("script")))
-        if (len(fonts) == 1 and drawn and not drawn.startswith("+") and not by_theme
-                and drawn.lower() != next(iter(fonts)).lower()):
-            asked = next(iter(fonts))
+        asked = next(iter(fonts)) if len(fonts) == 1 else None
+        # The theme's Latin font was not asked for by name, so a right-to-left
+        # font beside it is no sign of one set only halfway. A right-to-left
+        # font other than the theme's was chosen; the one left behind when a
+        # font is set by name is the theme's, or with a theme that names none,
+        # PowerPoint's default, which cannot be told from a choice.
+        by_name = asked and not asked.startswith("+") and asked not in set(themed.get("latin") or ())
+        left_behind = not themed.get("script") or drawn in set(themed["script"])
+        if (by_name and left_behind and drawn and not drawn.startswith("+")
+                and drawn.lower() != asked.lower()):
             script = _script(text.get("content") or "") or "right-to-left"
             findings.append(_finding(
                 slide_index, "font_missing", [name],

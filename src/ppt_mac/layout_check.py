@@ -502,6 +502,8 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         facts["slides"].append({
             "slide_index": slide_index,
             "layout_title": (drawn or {}).get("title"),
+            # From the saved file, like the right-to-left fonts it is held to.
+            "theme_fonts": (drawn or {}).get("theme_fonts"),
             "inner": inner,
             "design": design,
             "layout": _layout_name(own.get(k.layout)),

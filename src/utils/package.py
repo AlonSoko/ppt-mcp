@@ -252,6 +252,23 @@ def _scheme(archive, master):
     return colours
 
 
+def _theme_fonts(archive, master):
+    """The theme's heading and body fonts, Latin and right to left, as
+    ppt_com.layout_check._theme_fonts gives them."""
+    fonts = {"latin": [], "script": []}
+    theme = _related(None, archive, master, "theme")
+    if not theme or theme not in archive.namelist():
+        return fonts
+    scheme = ElementTree.fromstring(archive.read(theme)).find(".//a:fontScheme", _NS)
+    for part in ("a:majorFont", "a:minorFont"):
+        found = scheme.find(part, _NS) if scheme is not None else None
+        for kind, tag in (("latin", "a:latin"), ("script", "a:cs")):
+            font = found.find(tag, _NS) if found is not None else None
+            if font is not None and font.get("typeface"):
+                fonts[kind].append(font.get("typeface"))
+    return fonts
+
+
 def _colour(element, scheme):
     """The colour a fill element names, or None when it is changed by tints
     or shades, which are not worked out here."""
@@ -340,9 +357,10 @@ def layout_facts(path, slide_indices):
     """What each slide's layout draws and where it puts the title.
 
     ``{slide_index: {"graphics": [...], "title": [left, top, width, height],
-    "shows_master": bool}}``, the graphics in the shape the layout checks
-    read and the title as the layout places it, or as its master does when
-    the layout leaves it where the master put it.
+    "shows_master": bool, "theme_fonts": {...}}}``, the graphics in the shape
+    the layout checks read, the title as the layout places it, or as its
+    master does when the layout leaves it where the master put it, and the
+    fonts of the master's theme.
     """
     found = {}
     with zipfile.ZipFile(path) as archive:
@@ -359,7 +377,8 @@ def layout_facts(path, slide_indices):
             if title is None:
                 _, title = _layout_shapes(ElementTree.fromstring(archive.read(master)), scheme)
             found[index] = {"graphics": graphics, "title": title,
-                            "shows_master": root.get("showMasterSp", "1") not in ("0", "false")}
+                            "shows_master": root.get("showMasterSp", "1") not in ("0", "false"),
+                            "theme_fonts": _theme_fonts(archive, master)}
     return found
 
 

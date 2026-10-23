@@ -3465,7 +3465,10 @@ def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
               '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2"/></p:sldMaster>')
     theme = ('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>'
              '<a:clrScheme name="x"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>'
-             '<a:accent1><a:srgbClr val="C0504D"/></a:accent1></a:clrScheme></a:themeElements></a:theme>')
+             '<a:accent1><a:srgbClr val="C0504D"/></a:accent1></a:clrScheme>'
+             '<a:fontScheme name="x"><a:majorFont><a:latin typeface="Calibri Light"/><a:cs typeface=""/>'
+             '</a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:cs typeface="Arial"/>'
+             '</a:minorFont></a:fontScheme></a:themeElements></a:theme>')
     path = deck_file(tmp_path, [], {})
     entries = {n: zipfile.ZipFile(path).read(n) for n in zipfile.ZipFile(path).namelist()}
     entries["ppt/slides/_rels/slide1.xml.rels"] = RELS.format(
@@ -3486,6 +3489,8 @@ def test_a_layouts_own_graphics_and_title_are_read_from_the_file(tmp_path):
     [rule] = found["graphics"]
     assert (rule["name"], rule["top"], rule["height"]) == ("Rule", 100.0, 1.5)
     assert rule["fill"]["color_hex"] == "#C0504D"
+    # The theme's fonts, which the Mac holds a chosen right-to-left font to.
+    assert found["theme_fonts"] == {"latin": ["Calibri Light", "Calibri"], "script": ["Arial"]}
 
 
 class TestInsideGroups:
@@ -3613,6 +3618,31 @@ def test_a_theme_naming_no_right_to_left_font_leaves_it_to_powerpoint():
     page = slide(styled("body", 30, "Calibri", content="שלום, עולם.", script_font="Arial"))
     page["theme_fonts"] = {"latin": ["Calibri Light", "Calibri"], "script": []}
     assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []
+
+
+THEME_FONTS = {"latin": ["Calibri Light", "Calibri"], "script": ["Arial", "Arial"]}
+
+
+@pytest.mark.parametrize("latin", ["Calibri", "+mn-lt"])
+def test_a_hebrew_font_chosen_beside_the_themes_latin_one_is_a_choice(latin):
+    # The fix set the Hebrew to Calibri, which has no Hebrew letters, or to
+    # font_name='+mn-lt'.
+    page = slide(styled("body", 30, latin, content="שלום, עולם.", script_font="David"))
+    page["theme_fonts"] = THEME_FONTS
+    assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []
+
+
+def test_a_hebrew_font_chosen_beside_a_named_latin_one_is_a_choice():
+    page = slide(styled("body", 30, "Georgia", content="שלום, עולם.", script_font="David"))
+    page["theme_fonts"] = THEME_FONTS
+    assert [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"] == []
+
+
+def test_hebrew_left_in_the_themes_font_under_a_named_one_is_reported():
+    page = slide(styled("title", 30, "David", content="תולדות ישראל", script_font="Arial"))
+    page["theme_fonts"] = THEME_FONTS
+    [finding] = [f for f in slide_findings(page, W, H) if f["type"] == "font_missing"]
+    assert finding["fix"].startswith("Set the font again (ppt_format_text font_name='David')")
 
 
 class TestCropToFit:
