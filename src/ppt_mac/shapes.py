@@ -832,6 +832,10 @@ def _add_picture_impl(slide_index, file_path, left, top, width, height,
     # PowerPoint for Windows places an image with no resolution of its own.
     pixels = _image_pixels(absolute)
     natural = pixels[0] / pixels[1] if pixels else None
+    # Both given: the caller means those proportions, as on Windows. A side
+    # worked out here only puts the image's own back, and the picture stays
+    # locked to them, as PowerPoint locks a picture it places.
+    stretched = width is not None and height is not None
     if natural is not None:
         if width is None and height is None:
             width, height = pixels[0] * 0.75, pixels[1] * 0.75
@@ -840,10 +844,11 @@ def _add_picture_impl(slide_index, file_path, left, top, width, height,
         elif width is None:
             width = height * natural
     if width is not None and height is not None:
-        # Both specified: user intentionally overrides aspect ratio.
         pic.lock_aspect_ratio.set(False)
         pic.width.set(width)
         pic.height.set(height)
+        if not stretched:
+            pic.lock_aspect_ratio.set(True)
     elif width is not None:
         pic.lock_aspect_ratio.set(True)
         pic.width.set(width)
