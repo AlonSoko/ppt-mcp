@@ -3101,6 +3101,35 @@ _JOINERS = frozenset({"ES", "CS"})
 
 # The word that makes a range read right to left, by script.
 _RANGE_WORDS = {"Hebrew": "{a} עד {b}", "Arabic": "من {a} إلى {b}"}
+# What stands between the two ends of a range.
+_DASHES = "-–—−~"
+
+
+def _as_range(line, numbers, gaps):
+    """The two ends of a range, "10% – 20%", with their signs, or None.
+
+    A range is two numbers with a dash between them and nothing else but
+    spaces and the signs of the numbers, rising: "3 - 1" is a score, and
+    "2020: 5" is a label and its figure.
+    """
+    if len(numbers) != 2:
+        return None
+    gap = gaps[0]
+    dashes = [i for i, ch in enumerate(gap) if ch in _DASHES]
+    if len(dashes) != 1 or not all(ch.isspace() or ch in _DASHES or unicodedata.bidirectional(ch) == "ET"
+                                   for ch in gap):
+        return None
+    start = line.index(numbers[0])
+    # A minus right before the first number is its sign; one before the
+    # second would be a second dash, and the line is not a range.
+    sign = -1 if line[:start].rstrip()[-1:] in ("-", "−") else 1
+    try:
+        if sign * float(numbers[0].replace(",", "")) >= float(numbers[1].replace(",", "")):
+            return None
+    except ValueError:
+        pass
+    at = start + len(numbers[0]) + dashes[0]
+    return line[:at].strip(), line[at + 1:].strip()
 
 
 def _numbers_only(line):
@@ -3200,23 +3229,28 @@ def _number_order(slide_index, shapes):
             if not parts:
                 continue
             numbers, gaps = parts
-            # Numbers set apart by spaces alone, a phone number, are read left
-            # to right in any language.
-            if len(numbers) < 2 or not any(gap.strip() for gap in gaps):
+            # Numbers set apart by spaces and brackets alone, a phone number,
+            # are read left to right in any language.
+            if len(numbers) < 2 or not any(gap.strip(" ()[]") for gap in gaps):
+                continue
+            # Arabic-Indic digits are drawn from the right by themselves.
+            if any(unicodedata.bidirectional(ch) == "AN" for number in numbers for ch in number):
                 continue
             name = shape["name"]
+            where = f"slide_indices=[{slide_index}] shape_name='{name}' "
             set_rtl = (index <= len(directions) and directions[index - 1] == "rtl")
             then = "" if set_rtl else (
                 f", then set the line right to left "
                 f"({_direction_call(paragraphs, [index])}), which PowerPoint for "
                 "Windows needs to draw it from the right")
-            if len(numbers) == 2:
-                example = _RANGE_WORDS[script].format(a=numbers[0], b=numbers[1])
-                how = (f"replace it with \"{example}\" (ppt_find_replace_text "
+            ends = _as_range(line, numbers, gaps)
+            if ends:
+                example = _RANGE_WORDS[script].format(a=ends[0], b=ends[1])
+                how = (f"replace it with \"{example}\" (ppt_find_replace_text {where}"
                        f"find_text=\"{line}\" replace_text=\"{example}\"){then}")
             else:
                 how = (f"start it with a {script} word, the label it belongs to "
-                       f"(ppt_find_replace_text find_text=\"{line}\"){then}")
+                       f"(ppt_find_replace_text {where}find_text=\"{line}\"){then}")
             findings.append(_finding(
                 slide_index, "number_order", [name],
                 f"'{name}' has a line of numbers only, \"{line}\", on a slide "

@@ -1830,6 +1830,34 @@ class TestNumberOrder:
                           worded("years", 100, "1516 – 1917"))
         assert "من 1516 إلى 1917" in finding["fix"]
 
+    @staticmethod
+    def fix_for(line):
+        found = check(worded("heading", 40, "השלטון העות'מאני"), worded("years", 100, line))
+        return [f["fix"] for f in found if f["type"] == "number_order"]
+
+    def test_the_replacement_is_only_on_this_slide_and_shape(self):
+        # Without them, ppt_find_replace_text rewrites the line on every slide.
+        [fix] = self.fix_for("1516 – 1917")
+        assert "ppt_find_replace_text slide_indices=[1] shape_name='years' find_text=" in fix
+
+    def test_a_range_keeps_the_signs_of_its_ends(self):
+        assert 'replace_text="10% עד 20%"' in self.fix_for("10% – 20%")[0]
+        assert 'replace_text="$5 עד $10"' in self.fix_for("$5 – $10")[0]
+        assert 'replace_text="-5 עד 10"' in self.fix_for("-5 – 10")[0]
+        assert 'replace_text="-10 עד 5"' in self.fix_for("-10 – 5")[0]
+
+    def test_two_numbers_that_are_not_a_range_get_a_word_not_an_until(self):
+        for line in ("3 - 1", "5 - 5", "2020: 5"):
+            [fix] = self.fix_for(line)
+            assert "עד" not in fix and "Hebrew word" in fix
+
+    def test_a_phone_number_is_not_reported(self):
+        assert self.fix_for("(03) 123-4567") == []
+
+    def test_arabic_indic_digits_are_drawn_from_the_right_already(self):
+        assert check(worded("heading", 40, "الحكم العثماني"),
+                     worded("years", 100, "١٩٤٨–١٩٦٧")) == []
+
     def test_one_line_of_a_shape_is_judged_on_its_own(self):
         [finding] = check(worded("card", 40, "השלטון העות'מאני\r1516 – 1917"))
         assert finding["line"] == "1516 – 1917"
