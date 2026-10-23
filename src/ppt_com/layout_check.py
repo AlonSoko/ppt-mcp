@@ -1382,14 +1382,15 @@ def _template_rules(slide_index, shapes, template, layout):
         rules.append((graphic, box, _width(box) >= _height(box)))
     if not rules:
         return []
+    slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
+    obstacles = [(g, shape_box(g)) for g in template if g.get("visible", True)
+                 and not _turned(g) and not _is_backdrop(g, slide_w, slide_h)]
     findings = []
     for a in shapes:
         if not a.get("visible", True) or _is_line(a) or _turned(a):
             continue
-        if a.get("placeholder_type") is not None or not paints_box(a):
-            ink = text_box(a)
-        else:
-            ink = shape_box(a)
+        words_only = a.get("placeholder_type") is not None or not paints_box(a)
+        ink = text_box(a) if words_only else shape_box(a)
         if ink is None:
             continue
         for graphic, box, across in rules:
@@ -1404,24 +1405,25 @@ def _template_rules(slide_index, shapes, template, layout):
             if not crosses:
                 continue
             name = a["name"]
-            what = f"The text of '{name}'" if a.get("placeholder_type") is not None or not paints_box(a) \
-                else f"'{name}'"
+            what = f"The text of '{name}'" if words_only else f"'{name}'"
             source = _FROM.get(graphic.get("source"))
             drawn = f", drawn by {source}" if source else ""
-            if across and (a.get("text") or {}).get("chars") and (ink[1] + ink[3]) / 2 < line:
+            named = f"'{graphic['name']}'"
+            if words_only and across and (ink[1] + ink[3]) / 2 < line:
                 # Words above the rule that grew down across it: a title that
                 # wrapped.
                 fix = (f"Keep '{name}' to the room above the line: shorten the words "
                        f"or make the font smaller until they end above "
                        f"{_pt(line - _MIN_OVERLAP)} (ppt_format_text font_size=...).")
-            elif across:
-                by = box[3] + _CLEARANCE - ink[1]
-                fix = (f"Move '{name}' down by {_pt(by)}, below the line "
-                       f"(ppt_update_shape dtop={_num(by)}), or make it shorter.")
             else:
-                by = box[2] + _CLEARANCE - ink[0]
-                fix = (f"Move '{name}' right by {_pt(by)}, clear of the line "
-                       f"(ppt_update_shape dleft={_num(by)}), or make it narrower.")
+                # A card takes back the side that crossed, or moves the
+                # shorter way that leaves it on the slide and clear of the rest.
+                fix = (_template_resize(a, box, named, layout)
+                       or _template_shrink(a, box, named, keep=0.8)
+                       or _template_move(a, ink, box, named, shapes, obstacles, layout)
+                       or _template_shrink(a, box, named, keep=0.5)
+                       or (f"Move '{name}' clear of {named}, or make it smaller: "
+                           "nothing on the slide is meant to cross it."))
             findings.append(_finding(
                 slide_index, "overlap", [name, graphic["name"]],
                 f"{what} runs across '{graphic['name']}', a line the template draws"
@@ -1578,7 +1580,8 @@ def _template_shrink(a, union, named, keep):
     """Take back the side of a shape that crosses a template graphic.
 
     Only for a shape that paints, since a text frame made smaller keeps its
-    text by wrapping it, and only when at least ``keep`` of it is left.
+    text by wrapping it, and only when at least ``keep`` of it is left and its
+    words still fit.
     """
     if not paints_box(a):
         return None
@@ -1589,16 +1592,20 @@ def _template_shrink(a, union, named, keep):
         size = box[high] - box[low]
         if size <= 0:
             continue
+        def fits(target, low=low, size=size):
+            return target >= keep * size and not _spills_at(
+                a, target if low == 0 else _width(box), target if low == 1 else _height(box))
+
         if union[low] >= (box[low] + box[high]) / 2:
             target = union[low] - _CLEARANCE - box[low]
-            if target >= keep * size:
+            if fits(target):
                 options.append((size - target, (
                     f"Make '{a['name']}' {_pt(target)} {word} (ppt_update_shape "
                     f"{field}={_num(target)}), which leaves it {_pt(_CLEARANCE)} clear of {named}.")))
         elif union[high] <= (box[low] + box[high]) / 2:
             start = union[high] + _CLEARANCE
             target = box[high] - start
-            if target >= keep * size:
+            if fits(target):
                 options.append((size - target, (
                     f"Make '{a['name']}' {_pt(target)} {word}, keeping its far edge "
                     f"(ppt_update_shape {position}={_num(start)} {field}={_num(target)}), "
@@ -3017,10 +3024,17 @@ def _shortens(shape, by, edge):
 
 
 def _spills_at(shape, width, height):
-    """Whether the text in ``shape`` would spill out of a box this size."""
+    """Whether the text in ``shape`` would spill out of a box this size.
+
+    A box narrower than its words wraps them onto lines it was never measured
+    with, so it counts as spilling: how many more lines is not known here.
+    """
     text = shape.get("text")
     if not text or not text.get("chars"):
         return False
+    margins = text.get("margins") or _DEFAULT_MARGINS
+    if text.get("width") and text["width"] > width - margins["left"] - margins["right"] + 0.5:
+        return True
     from ppt_com.text import build_measurement
 
     return build_measurement(

@@ -3326,10 +3326,44 @@ class TestTemplateRules:
     def test_one_line_above_the_rule_is_not(self):
         assert [f for f in check_on([self.RULE], self.title(1)) if f["type"] == "overlap"] == []
 
-    def test_a_card_set_over_the_rule_is_moved_below_it(self):
+    def test_a_card_set_over_the_rule_takes_back_its_top(self):
         over = card("card", 40, 90, 300, 100, z=2)
         [found] = [f for f in check_on([self.RULE], over) if f["type"] == "overlap"]
-        assert "Move 'card' down by 17.5 pt" in found["fix"]
+        assert found["fix"].startswith("Make 'card' 82.5 pt tall, keeping its far edge "
+                                       "(ppt_update_shape top=107.5 height=82.5)")
+
+    FOOTER = graphic("Footer rule", 40, 500, 880, 1.5, source="master")
+
+    def test_a_card_over_a_footer_rule_stays_on_the_slide(self):
+        # It was told to move down 387.5 pt, to 507-892 on a 540 pt slide.
+        over = card("card", 40, 120, 880, 385, z=2)
+        [found] = [f for f in check_on([self.FOOTER], over) if f["type"] == "overlap"]
+        assert found["fix"].startswith("Make 'card' 374 pt tall (ppt_update_shape height=374)")
+
+    def test_a_card_with_words_is_resized_not_its_words_cut(self):
+        over = card("card", 40, 120, 880, 385, z=2,
+                    words=text(width=400, height=30, left=47.2, top=123.6))
+        [found] = [f for f in check_on([self.FOOTER], over) if f["type"] == "overlap"]
+        assert found["message"].startswith("'card' runs across")
+        assert found["fix"].startswith("Make 'card' 374 pt tall")
+
+    def test_a_card_is_not_narrowed_past_its_words(self):
+        # Narrower than its words, the card wraps them onto more lines than
+        # it was measured with, and they spill.
+        rule = graphic("Side rule", 280, 50, 1.5, 400, source="layout")
+        over = card("card", 100, 150, 200, 100, z=2,
+                    words=text(width=180, height=80, left=107.2, top=153.6))
+        [found] = [f for f in check_on([rule], over) if f["type"] == "overlap"]
+        assert "174 pt wide" not in found["fix"]
+        assert found["fix"].startswith("Move 'card' left")
+
+    def test_a_card_its_words_fill_is_moved_rather_than_shortened(self):
+        over = card("card", 40, 120, 880, 385, z=2,
+                    words=text(width=800, height=370, left=47.2, top=123.6))
+        [found] = [f for f in check_on([self.FOOTER], over) if f["type"] == "overlap"]
+        assert found["fix"].startswith("Move 'card' up by 11 pt (ppt_update_shape dtop=-11)")
+        over["top"] -= 11
+        assert [f for f in check_on([self.FOOTER], over) if f["type"] == "overlap"] == []
 
     def test_a_slanting_line_is_not_a_rule(self):
         slant = graphic("Slant", 600, 0, 200, 540, source="layout")
