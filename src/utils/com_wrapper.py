@@ -298,6 +298,9 @@ class PowerPointCOMWrapper:
         # Whether this server started PowerPoint, rather than finding it
         # running. Only then is it quit when its last presentation closes.
         self._launched_by_us = False
+        # The process it was, when it could be read, so a PowerPoint that took
+        # its place is not mistaken for it. See `_still_ours`.
+        self._launched_pid: Optional[int] = None
         # The per-call target of the operation a worker is running, if its
         # tool call named one (see call_presentation).  Thread-local, because
         # an abandoned worker and its replacement can overlap.
@@ -775,6 +778,28 @@ class PowerPointCOMWrapper:
                 )
             ) from None
 
+    def _app_pid(self) -> Optional[int]:
+        """The process id of the PowerPoint this wrapper holds, or None when
+        it cannot be read."""
+        try:
+            import win32process
+
+            return win32process.GetWindowThreadProcessId(self._app.HWND)[1]
+        except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+            return None
+
+    def _still_ours(self) -> bool:
+        """Whether the PowerPoint held now is the one this server started.
+
+        When the process id could not be read at launch, the flag alone
+        decides, as it did before the id was kept.
+        """
+        if not self._launched_by_us:
+            return False
+        if self._launched_pid is None:
+            return True
+        return self._app_pid() == self._launched_pid
+
     def _connect_impl(self, visible: Optional[bool] = None, allow_launch: bool = True) -> Any:
         """Internal: connect to PowerPoint on the COM thread.
 
@@ -802,6 +827,7 @@ class PowerPointCOMWrapper:
             self._app = win32com.client.GetActiveObject("PowerPoint.Application")
             logger.info("Attached to existing PowerPoint instance")
             self._launched_by_us = False
+            self._launched_pid = None
         except pywintypes.com_error as e:
             if e.hresult in _BUSY_HRESULTS:
                 # PowerPoint is running but busy (modal dialog). Re-raise as
@@ -817,6 +843,7 @@ class PowerPointCOMWrapper:
                 logger.info("Launched new PowerPoint instance via Dispatch")
                 launched_new = True
                 self._launched_by_us = True
+                self._launched_pid = self._app_pid()
             except pywintypes.com_error as e2:
                 if e2.hresult in _BUSY_HRESULTS:
                     raise  # PowerPoint busy — _run_item decides whether to retry

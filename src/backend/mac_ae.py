@@ -396,6 +396,19 @@ class _Job:
         return self.drop()
 
 
+def _powerpoint_pid() -> Optional[int]:
+    """The process id of the running PowerPoint, or None when there is none
+    or it cannot be told."""
+    try:
+        found = subprocess.run(
+            ["pgrep", "-x", "Microsoft PowerPoint"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+        return int(found[0]) if found else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 class PowerPointAppleEventWrapper:
     """Manages the connection to PowerPoint over Apple Events.
 
@@ -418,6 +431,9 @@ class PowerPointAppleEventWrapper:
         # Whether this server started PowerPoint, rather than finding it
         # running. Only then is it quit when its last presentation closes.
         self._launched_by_us = False
+        # The process it was, so a PowerPoint that took its place is not
+        # mistaken for it. See `_still_ours`.
+        self._launched_pid: Optional[int] = None
         # The per-call target of the job the worker is running, if its tool
         # call named one. See `call_presentation` in utils.com_wrapper.
         self._call_local = threading.local()
@@ -613,6 +629,20 @@ class PowerPointAppleEventWrapper:
 
     # -- connection --------------------------------------------------------
 
+    def _still_ours(self) -> bool:
+        """Whether the PowerPoint that is running is the one this server started.
+
+        The user can quit that one and start another by hand. appscript
+        follows an application by its bundle id and reconnects to the new
+        process without raising, so the connection looks the same and the
+        flag would still say it is ours.
+        """
+        return (
+            self._launched_by_us
+            and self._launched_pid is not None
+            and _powerpoint_pid() == self._launched_pid
+        )
+
     def connect(self, visible: Optional[bool] = None, allow_launch: bool = True) -> Any:
         """Connect to PowerPoint, launching it when allowed.
 
@@ -667,8 +697,10 @@ class PowerPointAppleEventWrapper:
                     "PowerPoint did not finish starting. Is it installed?"
                 )
             self._launched_by_us = True
+            self._launched_pid = _powerpoint_pid()
         else:
             self._launched_by_us = False
+            self._launched_pid = None
         if visible:
             candidate.activate()
 

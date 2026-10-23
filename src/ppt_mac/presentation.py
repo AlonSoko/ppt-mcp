@@ -28,6 +28,7 @@ import shutil
 from typing import Optional
 
 from appscript import k, mactypes
+from appscript.reference import CommandError
 
 from backend.mac_ae import (
     EXPORT_STAGING_DIR,
@@ -106,7 +107,8 @@ def _bring_window_forward(app, pres, full_name: str) -> None:
     try:
         if app.active_window.presentation.full_name() == full_name:
             return
-    except Exception:  # noqa: BLE001 - no window yet, so activate to be sure
+    except CommandError:
+        # No window yet, or the start gallery is in front: activate to be sure.
         pass
     pres.document_windows[1].activate()
 

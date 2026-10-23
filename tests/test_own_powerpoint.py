@@ -41,6 +41,7 @@ windows_only = pytest.mark.skipif(
 @pytest.fixture
 def server_started(monkeypatch):
     monkeypatch.setattr(backend.ppt, "_launched_by_us", True)
+    monkeypatch.setattr(backend.ppt, "_still_ours", lambda: True)
     monkeypatch.setattr(backend.ppt, "_app", object())
     monkeypatch.setattr(backend.ppt, "_target_pres_full_name", "/decks/a.pptx")
 
@@ -67,6 +68,69 @@ class TestQuitIfOurs:
         quit = MagicMock()
         assert backend.quit_if_ours(quit) == {}
         quit.assert_not_called()
+
+    def test_one_that_took_the_place_of_ours_is_left_alone(self, server_started, monkeypatch):
+        # The user quit the PowerPoint this server started and started another.
+        monkeypatch.setattr(backend.ppt, "_still_ours", lambda: False)
+        quit = MagicMock()
+        assert backend.quit_if_ours(quit) == {}
+        quit.assert_not_called()
+        assert backend.ppt._launched_by_us is False
+
+    def test_a_quit_that_fails_does_not_fail_the_close(self, server_started):
+        quit = MagicMock(side_effect=RuntimeError("busy"))
+        assert backend.quit_if_ours(quit) == {}
+        assert backend.ppt._launched_by_us is True
+
+
+@macos_only
+class TestMacKnowsWhichPowerPointItStarted:
+    def _wrapper(self, monkeypatch, started_pid, now_pid):
+        from backend import mac_ae
+
+        wrapper = mac_ae.PowerPointAppleEventWrapper()
+        wrapper._launched_by_us = True
+        wrapper._launched_pid = started_pid
+        monkeypatch.setattr(mac_ae, "_powerpoint_pid", lambda: now_pid)
+        return wrapper
+
+    def test_the_same_process_is_ours(self, monkeypatch):
+        assert self._wrapper(monkeypatch, 100, 100)._still_ours() is True
+
+    def test_another_process_is_not(self, monkeypatch):
+        assert self._wrapper(monkeypatch, 100, 200)._still_ours() is False
+
+    def test_a_process_that_is_gone_is_not(self, monkeypatch):
+        assert self._wrapper(monkeypatch, 100, None)._still_ours() is False
+
+    def test_a_process_we_could_not_read_at_launch_is_not_quit(self, monkeypatch):
+        assert self._wrapper(monkeypatch, None, 200)._still_ours() is False
+
+    def test_what_we_did_not_start_is_never_ours(self, monkeypatch):
+        wrapper = self._wrapper(monkeypatch, 100, 100)
+        wrapper._launched_by_us = False
+        assert wrapper._still_ours() is False
+
+
+class TestWindowsKnowsWhichPowerPointItStarted:
+    def _wrapper(self, started_pid, now_pid, ours=True):
+        from utils.com_wrapper import PowerPointCOMWrapper
+
+        wrapper = PowerPointCOMWrapper()
+        wrapper._launched_by_us = ours
+        wrapper._launched_pid = started_pid
+        wrapper._app_pid = lambda: now_pid
+        return wrapper
+
+    def test_the_same_process_is_ours(self):
+        assert self._wrapper(100, 100)._still_ours() is True
+
+    def test_another_process_is_not(self):
+        assert self._wrapper(100, 200)._still_ours() is False
+
+    def test_without_a_process_id_the_flag_decides(self):
+        assert self._wrapper(None, 200)._still_ours() is True
+        assert self._wrapper(None, 200, ours=False)._still_ours() is False
 
 
 # ---------------------------------------------------------------------------
@@ -105,12 +169,13 @@ class TestWindowsRemembersWhoStartedIt:
 
 @windows_only
 class TestWindowsClose:
-    def _close(self, monkeypatch, left_open, keep=False):
+    def _close(self, monkeypatch, left_open, keep=False, protected=0):
         import ppt_com.presentation as presentation
 
         app = MagicMock()
         pres = MagicMock(Name="a.pptx")
         app.Presentations.Count = left_open
+        app.ProtectedViewWindows.Count = protected
         monkeypatch.setattr(presentation.ppt, "_get_app_impl", lambda allow_launch=False: app)
         monkeypatch.setattr(presentation, "_resolve_presentation", lambda app, **kw: pres)
         return presentation._close_presentation_impl(False, None, None, keep), app
@@ -128,6 +193,11 @@ class TestWindowsClose:
     def test_not_when_asked_to_keep_it(self, monkeypatch, server_started):
         _, app = self._close(monkeypatch, left_open=0, keep=True)
         app.Quit.assert_not_called()
+
+    def test_not_while_a_file_is_open_in_protected_view(self, monkeypatch, server_started):
+        result, app = self._close(monkeypatch, left_open=0, protected=1)
+        app.Quit.assert_not_called()
+        assert "powerpoint_quit" not in result
 
     def test_not_one_the_user_started(self, monkeypatch):
         monkeypatch.setattr(backend.ppt, "_launched_by_us", False)

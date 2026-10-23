@@ -337,6 +337,12 @@ PowerPointのモーダルダイアログ（SmartArt レイアウト選択、保�
 
 ESCは変更を確定せずにキャンセルするため、意図しない操作は発生しません。人間が操作しない自動化ワークフローで特に有用です。
 
+### サーバーが起動するPowerPoint
+
+PowerPointが起動していないときにツールが必要とすると（`ppt_create_presentation`、`ppt_open_presentation`、`ppt_connect`）、サーバーがPowerPointを起動します。macOSではバックグラウンドで起動し、作業中のアプリから前面を奪いません。
+
+サーバーが起動したPowerPointで、閉じた結果プレゼンテーションが1つも残らないとき、`ppt_close_presentation` はPowerPointも終了し、その旨（`powerpoint_quit`）を返します。自分で起動したPowerPointは終了されません。プレゼンテーションが開いたままのもの（Windowsでは保護ビューで開いているファイルも含む）も終了されません。続けて別のプレゼンテーションを開くときなどは、`keep_powerpoint_open=true` で起動したままにできます。ツールがPowerPointを再び起動するまでは、PowerPointを必要とするツールは、空の一覧ではなく「PowerPointが起動していない」と答えます。
+
 ### アイコンのサイトがブロックされているネットワーク
 
 `ppt_search_icons` はアイコン一覧を `fonts.google.com` から読み込み、`ppt_add_svg_icon` はアイコンを `cdn.jsdelivr.net` からダウンロードします。URL からの画像も含め、すべてのダウンロードは 15 秒で打ち切られ、接続できなかったホストをエラーに示します。次の 3 つの設定で変更できます：

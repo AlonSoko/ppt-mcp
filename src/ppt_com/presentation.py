@@ -541,9 +541,23 @@ def _close_presentation_impl(
 
     pres.Close()
     result = {"success": True, "closed": name}
-    if not keep_powerpoint_open and app.Presentations.Count == 0:
+    if not keep_powerpoint_open and _nothing_is_open(app):
         result.update(quit_if_ours(lambda: app.Quit()))
     return result
+
+
+def _nothing_is_open(app) -> bool:
+    """No presentation and no Protected View window is open.
+
+    A file the user is reading in Protected View is not in ``Presentations``,
+    and quitting PowerPoint would close it.
+    """
+    if app.Presentations.Count != 0:
+        return False
+    try:
+        return app.ProtectedViewWindows.Count == 0
+    except Exception:  # noqa: BLE001 - cannot tell, so leave PowerPoint running
+        return False
 
 
 def _get_presentation_info_impl(
