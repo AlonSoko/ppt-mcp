@@ -22,7 +22,9 @@ from utils.offload import run_offloaded
 from backend import ppt
 from utils.navigation import goto_slide
 from utils.color import hex_to_int, int_to_hex
+from utils.download import open_url
 from ppt_com.constants import (
+    ICON_METADATA_URL,
     ICON_PACKAGE_BASE,
     msoTrue, msoFalse,
     msoShapeRectangle,
@@ -49,9 +51,6 @@ _ICON_CACHE_TTL = 86400   # 24 hours
 # reach the fetch at once.  The lock keeps that to a single network call.
 _icon_cache_lock = threading.Lock()
 
-_ICON_METADATA_URL = "https://fonts.google.com/metadata/icons"
-
-
 def _fetch_icon_metadata():
     """Fetch and cache the Material Symbols icon metadata from Google Fonts.
 
@@ -71,17 +70,18 @@ def _fetch_icon_metadata():
         if _icon_cache is not None and (now - _icon_cache_time) < _ICON_CACHE_TTL:
             return _icon_cache
 
-        resp = urllib.request.urlopen(_ICON_METADATA_URL)
+        resp = open_url(ICON_METADATA_URL, "download the icon list", "PPT_ICON_METADATA_URL")
         raw = resp.read().decode("utf-8")
 
-        # Strip XSS protection prefix  )]}'
-        first_nl = raw.index("\n")
-        json_str = raw[first_nl + 1:]
-        data = json.loads(json_str)
+        # Google Fonts puts an XSS guard line, )]}', before the JSON. A copy
+        # from a mirror, or saved without it, starts with the JSON itself.
+        if raw.startswith(")]}'"):
+            raw = raw[raw.index("\n") + 1:]
+        data = json.loads(raw)
 
         _icon_cache = data.get("icons", [])
         _icon_cache_time = now
-        logger.info("Fetched %d icons from Google Fonts metadata", len(_icon_cache))
+        logger.info("Read %d icons from %s", len(_icon_cache), ICON_METADATA_URL)
         return _icon_cache
 
 
@@ -181,9 +181,8 @@ def _icon_is_on_cdn(name: str) -> bool:
         return cached
 
     url = f"{ICON_PACKAGE_BASE}/outlined/{name}.svg"
-    request = urllib.request.Request(url, method="HEAD")
     try:
-        with urllib.request.urlopen(request, timeout=5):
+        with open_url(url, "check an icon", method="HEAD", timeout=5):
             available = True
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
@@ -1101,7 +1100,7 @@ def _add_picture_from_url_impl(slide_index, url, left, top, width, height, svg_c
     slide = pres.Slides(slide_index)
 
     # Download the image
-    resp = urllib.request.urlopen(url)
+    resp = open_url(url, "download the picture")
     content_type = resp.headers.get("Content-Type", "")
     is_svg = url.lower().endswith(".svg") or "svg" in content_type
 
@@ -1352,7 +1351,7 @@ def _add_svg_icon_impl(slide_index, icon_name, left, top, width, height, color, 
 
     # Download SVG
     try:
-        resp = urllib.request.urlopen(svg_url)
+        resp = open_url(svg_url, "download the icon", "PPT_ICON_BASE_URL")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise ValueError(

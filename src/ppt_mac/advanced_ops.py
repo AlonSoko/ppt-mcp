@@ -78,6 +78,7 @@ from ppt_com.constants import (
     msoShapeRectangle,
 )
 from ppt_mac.export import _staging_path
+from utils.download import open_url
 from ppt_mac.layout import _NO_SHAPE_RANGE
 from ppt_mac.shapes import (
     _WIN_AUTO_SHAPE_TYPE,
@@ -1143,7 +1144,7 @@ def _add_picture_from_url_impl(slide_index, url, left, top, width, height, svg_c
     pres = ppt._get_pres_impl()
     slide = _slide(pres, slide_index)
 
-    resp = urllib.request.urlopen(url)
+    resp = open_url(url, "download the picture")
     content_type = resp.headers.get("Content-Type", "")
     is_svg = url.lower().endswith(".svg") or "svg" in content_type
 
@@ -1277,7 +1278,7 @@ def _add_svg_icon_impl(slide_index, icon_name, left, top, width, height, color, 
     svg_url = f"{base}/{style}/{file_name}.svg"
 
     try:
-        resp = urllib.request.urlopen(svg_url)
+        resp = open_url(svg_url, "download the icon", "PPT_ICON_BASE_URL")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise ValueError(
