@@ -3042,6 +3042,52 @@ class TestTitleEdge:
         shapes[0] = self.big(textbox("title", 80, 30, 800, 55.74, z=1, text_width=300, text_height=48))
         assert [f for f in check(*shapes) if f["type"] == "title_edge"] == []
 
+    def test_a_row_reaching_left_to_the_title_widens_as_one(self):
+        # Widening only the first card made it the odd one out, and the
+        # uneven-sizes fix took the change back.
+        title = self.big(textbox("title", 40, 30, 880, 56, text_width=400, text_height=40))
+        cards = [card(f"card{i}", left, 140, 268, 180, z=2 + i)
+                 for i, left in enumerate((52, 352, 652))]
+        [finding] = [f for f in check(title, *cards) if f["type"] == "title_edge"]
+        assert "shape_names=['card0', 'card1', 'card2'] width=269.6" in finding["fix"]
+        for c, by in zip(cards, (-4.8, -3.2, -1.6), strict=True):
+            c["left"], c["width"] = c["left"] + by, 269.6
+        assert [f for f in check(title, *cards)
+                if f["type"] in ("title_edge", "uneven_sizes", "uneven_gaps")] == []
+
+    def test_centred_text_keeps_no_edge_to_bring_in(self):
+        # Its words start wherever their length puts them, and move half as
+        # far as its frame does: the fix only ever halved the gap.
+        title = self.big(textbox("title", 40, 30, 880, 56, text_width=400, text_height=40))
+        caption = set_to(textbox("caption", 40, 100, 880, 30, text_width=856, text_height=20),
+                         "center")
+        assert [f for f in check(title, caption) if f["type"] == "title_edge"] == []
+
+    def test_left_set_text_under_a_right_set_title_is_not_held_to_its_right(self):
+        title = self.big(placed("title", 40, 30, 880, 55.74, 920 - 7.2 - 300, 33.6, 300, 48))
+        note = textbox("note", 40, 140, 880, 30, text_width=858, text_height=20)
+        assert [f for f in check(title, note) if f["type"] == "title_edge"] == []
+
+    def test_a_write_does_not_take_the_line_it_touched_for_the_title(self):
+        # Live on the Mac: a write reads only what it touched, so the title's
+        # words were unknown and the touched line under it was taken for it.
+        title = shape("title", 40, 30, 880, 50, unread=True)
+        line = self.big(placed("line", 40, 120, 880, 40, 920 - 7.2 - 150, 123.6, 150, 30))
+        below = placed("below", 40, 200, 874.6, 40, 914.6 - 7.2 - 140, 203.6, 140, 30)
+        page = slide(title, line, below)
+        assert [f for f in slide_findings(page, W, H, only={"line"})
+                if f["type"] == "title_edge"] == []
+        # Read in full, the slide has its real title and the line is body.
+        del title["unread"]
+        assert layout_check.find_title({"shapes": [line, below]}, H) is line
+
+    def test_shapes_a_write_leaves_unread_are_marked(self):
+        at = {"a": (0, 0), "b": (5, 5), "far": (500, 400)}
+        shapes = layout_check.read_shapes(
+            ["a", "b", "far"], lambda ref, z: shape(ref, *at[ref], 10, 10, z=z),
+            lambda facts, ref, full: facts, {"a"})
+        assert [s.get("unread") for s in shapes] == [None, None, True]
+
     def test_a_right_set_title_is_held_to_the_right_edge(self):
         shapes = titled_row()
         shapes[0] = self.big(placed("title", 40, 30, 880, 55.74, 920 - 7.2 - 300, 33.6, 300, 48))

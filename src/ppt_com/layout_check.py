@@ -1533,12 +1533,13 @@ def _template_resize(a, union, named, layout):
     return None
 
 
-def _fit_row(mates, layout, low, start, end, kind, named, lead=None):
+def _fit_row(mates, layout, low, start, end, kind, named, lead=None, grow=False):
     """Narrow a row (or column) of like shapes evenly to fit between ``start`` and ``end``.
 
     Either bound may be None, and then that end of the row stays where it is.
     The gaps stay as they are, every card takes one new size, and each card
-    moves with what is on it.
+    moves with what is on it. With ``grow`` the row may also widen to reach
+    the bounds.
     """
     boxes = layout["boxes"]
     high = low + 2
@@ -1551,7 +1552,7 @@ def _fit_row(mates, layout, low, start, end, kind, named, lead=None):
     begin = first if start is None else start
     finish = last if end is None else end
     size = (finish - begin - gap * (len(members) - 1)) / len(members)
-    if gap < 0 or size < 0.5 * min(sizes) or size >= min(sizes):
+    if gap < 0 or size < 0.5 * min(sizes) or (size >= min(sizes) and not grow):
         return None
     field, position = ("width", "left") if low == 0 else ("height", "top")
     moves = []
@@ -2484,6 +2485,10 @@ def _title_body_edge(slide_index, shapes, layout):
     title = find_title({"shapes": shapes}, slide_h) if slide_h else None
     if title is None:
         return []
+    # A write reads only what it touched; a shape above whose words were not
+    # read may be the real title, and the one found only the first line under it.
+    if any(s.get("unread") and s["top"] <= title["top"] + _EDGE_TOLERANCE for s in shapes):
+        return []
     side = _title_side(title)
     words = text_box(title)
     if side == "center" or words is None:
@@ -2499,6 +2504,11 @@ def _title_body_edge(slide_index, shapes, layout):
             continue
         # A shape run off an edge is a bleed, not part of the column.
         if ink[0] <= _EDGE_TOLERANCE or (slide_w and ink[2] >= slide_w - _EDGE_TOLERANCE):
+            continue
+        # Centred text, or text set to the other side, keeps no edge on this
+        # one: where its words start moves with their length, and with half
+        # of any change made to its frame.
+        if ("right" if right else "left") not in _kept_edges(shape):
             continue
         body.append((shape, ink))
     if not body:
@@ -2541,8 +2551,10 @@ def _body_to_title(keepers, delta, right, layout):
     row = layout["rows"].get(keepers[0]["name"])
     if row and len(row) > 1:
         edge = boxes[keepers[0]["name"]][2 if right else 0] + delta
+        # The whole row widens with its first card, so that it stays one
+        # width: one card made wider is the odd one out.
         fix = _fit_row(row, layout, 0, None if right else edge, edge if right else None,
-                       "row", "", lead=lead)
+                       "row", "", lead=lead, grow=True)
         if fix:
             return fix
     calls = []
@@ -4613,6 +4625,9 @@ def read_shapes(refs, geometry, appearance, detail):
             # The colours of text on a touched card are read too, since they
             # are drawn on its fill.
             appearance(facts, ref, _on_touched(facts, touched))
+        elif facts["name"] not in detail:
+            # Its words are not known: no text is not the same as none read.
+            facts["unread"] = True
     return shapes
 
 
