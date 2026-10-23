@@ -3206,6 +3206,50 @@ class TestTopAndBottomMargins:
         assert "24 pt shorter, keeping their top" in found["fix"]
         assert "dheight=-24" in found["fix"]
 
+    def test_shortened_cards_keep_their_margin(self):
+        shapes = self.row_at(6)
+        for c in shapes[1:]:
+            c["top"], c["height"] = 100, H - 6 - 100 - 24
+        assert [f for f in check(*shapes) if f["type"] == "narrow_margin"] == []
+
+    def text_under_a_card(self, words):
+        title = textbox("Title", 40, 30, 880, 56, text_width=400, text_height=40)
+        return title, card("Card", 40, 100, 880, 300), textbox(
+            "Notes", 40, 410, 880, 130, text_width=600, text_height=words)
+
+    def test_text_with_no_room_is_cut_not_its_box_shortened(self):
+        # A shorter box leaves top-set words where they are and spills them,
+        # and the same finding came back after every shortening.
+        [found] = [f for f in check(*self.text_under_a_card(120)) if f["type"] == "narrow_margin"]
+        assert found["fix"].startswith("Cut the text in 'Notes' or make the font smaller, "
+                                       "so it ends 23.6 pt further from the edge")
+        assert "dheight" not in found["fix"]
+
+    def bottom_set(self, height):
+        title, other, _ = self.text_under_a_card(0)
+        other["height"] = 340
+        notes = textbox("Notes", 40, 410, 880, height, text_width=600, text_height=80)
+        notes["text"]["top"] = 410 + height - 3.6 - 80
+        return title, other, notes
+
+    def test_words_set_to_the_bottom_come_up_with_a_shorter_box(self):
+        # Cutting them would leave their last line where it is.
+        [found] = [f for f in check(*self.bottom_set(124)) if f["type"] == "narrow_margin"]
+        assert "20.4 pt shorter, keeping its top" in found["fix"]
+        assert [f for f in check(*self.bottom_set(124 - 20.4))
+                if f["type"] in ("narrow_margin", "overflow")] == []
+
+    def test_cut_text_keeps_its_margin(self):
+        assert [f for f in check(*self.text_under_a_card(120 - 23.6))
+                if f["type"] in ("narrow_margin", "overflow")] == []
+
+    def test_a_card_whose_words_would_spill_is_not_shortened(self):
+        title, other, _ = self.text_under_a_card(0)
+        full = card("Full", 40, 410, 880, 124, z=3,
+                    words=text(width=600, height=110, left=47.2, top=413.6))
+        [found] = [f for f in check(title, other, full) if f["type"] == "narrow_margin"]
+        assert found["fix"].startswith("Cut the text in 'Full'")
+
     def test_cards_that_keep_room_are_not(self):
         assert [f for f in check(*self.row_at(40)) if f["type"] == "narrow_margin"] == []
 

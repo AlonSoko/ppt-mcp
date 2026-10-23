@@ -2962,6 +2962,15 @@ def _vertical_margins(slide_index, layout, slide_h):
         if room - _CLEARANCE >= by:
             fix = (f"Move {which} {'down' if edge == 'top' else 'up'} by {_pt(by)} "
                    f"(ppt_update_shape {target} dtop={_num(by if edge == 'top' else -by)}).")
+        elif not all(_shortens(crowded[m][0], by, edge) for m in row):
+            # The words are what is near the edge, or a shorter box would
+            # spill them: a smaller frame only moves the problem.
+            fix = (f"Cut the text in {which} or make the font smaller, so "
+                   f"{'they' if len(names) > 1 else 'it'} "
+                   f"{'start' if edge == 'top' else 'end'}{'' if len(names) > 1 else 's'} "
+                   f"{_pt(by)} further from the edge: there is no room to move "
+                   f"{'them' if len(names) > 1 else 'it'} {'down' if edge == 'top' else 'up'}, "
+                   "and a shorter box would leave the words where they are or spill them.")
         else:
             keep = "bottom" if edge == "top" else "top"
             extra = f" dtop={_num(by)}" if edge == "top" else ""
@@ -2979,6 +2988,30 @@ def _vertical_margins(slide_index, layout, slide_h):
             margin_pt=want,
         ))
     return findings
+
+
+def _shortens(shape, by, edge):
+    """Whether making ``shape`` ``by`` shorter, from ``edge``, moves the edge
+    the check sees.
+
+    A box that paints its frame is measured by the frame. For bare text the
+    words are, and they move only when they are set to that edge of the box:
+    words set to the top stay where they are when the bottom comes up. A box
+    whose text would no longer fit trades the margin for an overflow.
+    """
+    if not paints_box(shape) and (_text_anchor(shape) or (None, None))[1] != edge:
+        return False
+    text = shape.get("text")
+    if not text or not text.get("chars"):
+        return True
+    from ppt_com.text import build_measurement
+
+    measurement = build_measurement(
+        [], text.get("width"), text.get("height"),
+        shape["width"], shape["height"] - by, text.get("margins"),
+        text.get("word_wrap"), text.get("autofit"), text.get("orientation"),
+    )
+    return not measurement["overflows"]
 
 
 # Text a template or a draft leaves for someone to replace. The words in any
