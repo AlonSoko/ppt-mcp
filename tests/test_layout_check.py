@@ -303,6 +303,35 @@ class TestOverlap:
 WHITE_TEXT = [{"color_hex": "#FFFFFF", "size": 20.0, "bold": False}]
 
 
+def blocked_caption(card_height, kind=None):
+    """A caption over the top of a card, with a badge just above it, so the
+    caption cannot move up."""
+    caption = textbox("cap", 40, 92, 400, 40, z=3, text_width=380, text_height=30)
+    badge = card("badge", 40, 66, 300, 24, z=4)
+    under = card("pic", 40, 120, 600, card_height, z=2)
+    if kind is not None:
+        under["type"] = kind
+    return caption, badge, under
+
+
+class TestWhereTheOtherShapeLands:
+    """#264: the fix that moves the other shape did not check where it went."""
+
+    def test_it_moves_the_other_shape_when_there_is_room(self):
+        [finding] = check(*blocked_caption(300))
+        assert "Move 'pic' down by 11.6 pt" in finding["fix"]
+
+    def test_it_is_not_pushed_off_the_slide(self):
+        # Moved down 11.6 pt, the 410 pt card ran 1.6 pt off the bottom.
+        [finding] = check(*blocked_caption(410))
+        assert "Move 'pic'" not in finding["fix"]
+        assert "ppt_update_shape shape_name='pic' dtop=11.6 dheight=-11.6" in finding["fix"]
+
+    def test_and_a_picture_is_not_trimmed_out_of_its_proportions(self):
+        [finding] = check(*blocked_caption(410, kind=msoPicture))
+        assert finding["fix"].startswith("Make room between the text of 'cap' and 'pic'")
+
+
 class TestContrast:
     def test_white_text_on_a_white_slide_is_reported(self):
         [finding] = check(textbox("t", 100, 100, 300, 50, runs=WHITE_TEXT))
