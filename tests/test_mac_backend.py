@@ -1184,3 +1184,47 @@ class TestStagingThroughPowerPointsContainer:
         monkeypatch.setattr(mac_ae, "EXPORT_STAGING_DIR", str(tmp_path / "Documents"))
         assert mac_ae.staging_dir() == str(tmp_path / "Documents")
         assert list((tmp_path / "Documents").iterdir()) == []
+
+
+@macos_only
+class TestDuplicatingASlide:
+    """PowerPoint 16.114 answers -50 to `duplicate slide`, so a slide is copied
+    and pasted into its own presentation, and the clipboard put back."""
+
+    def test_it_is_copied_and_pasted_into_its_own_deck(self, monkeypatch):
+        from ppt_mac import gvml_paste
+        from ppt_mac import slides as mac_slides
+
+        ids, scripts, events = [256, 257], [], []
+
+        def run(script, *args, **kwargs):
+            scripts.append(script)
+            if "paste object" in script:
+                ids.append(258)
+            return ""
+
+        class FakeClipboard:
+            warnings = ()
+
+            @classmethod
+            def take(cls):
+                events.append("take")
+                return cls()
+
+            def claim(self):
+                events.append("claim")
+
+            def restore(self):
+                events.append("restore")
+
+        monkeypatch.setattr(mac_slides, "osascript", run)
+        monkeypatch.setattr(mac_slides, "_slide_ids", lambda pres: list(ids))
+        monkeypatch.setattr(mac_slides, "_presentation_index", lambda app, pres: 2)
+        monkeypatch.setattr(gvml_paste, "Clipboard", FakeClipboard)
+
+        assert mac_slides._duplicate_once(None, None, 1) == 258
+        assert scripts == [
+            'tell application "Microsoft PowerPoint" to copy object slide 1 of presentation 2',
+            'tell application "Microsoft PowerPoint" to paste object presentation 2',
+        ]
+        assert events == ["take", "claim", "restore"]
