@@ -4072,3 +4072,12 @@ class TestBlurryPictures:
     def test_a_cropped_image_counts_only_the_part_shown(self):
         # The pixels are those of the part shown, as the saved file gives them.
         assert kinds(check(photo(480, 270, (400, 225)))) == ["blurry_picture"]
+
+
+class TestTheMorphTransition:
+    @pytest.mark.parametrize("effect, morph", [(3954, True), (3955, True), (3956, True),
+                                               (0, False), (3953, False)])
+    def test_windows_tells_it_by_its_entry_effect(self, effect, morph):
+        # Read live from slides set to Morph by object, word and character.
+        slide = SimpleNamespace(SlideShowTransition=SimpleNamespace(EntryEffect=effect))
+        assert layout_check._morph(slide) is morph

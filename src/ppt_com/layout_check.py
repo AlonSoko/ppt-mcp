@@ -78,8 +78,9 @@ CHECK_EACH_WRITE = _check_each_write(os.getenv("PPT_LAYOUT_CHECKS", "on"))
 # The same allowance ppt_check_typography gives an off-slide edge.
 _EDGE_TOLERANCE = 0.5
 
-# PpEntryEffect values of the Morph transition: by object, word and character.
-MORPH_EFFECTS = frozenset({3953, 3954, 3955})
+# PpEntryEffect values of the Morph transition: by object, word and character,
+# as PowerPoint for Windows reads them from a deck.
+MORPH_EFFECTS = frozenset({3954, 3955, 3956})
 
 # Edges this close are one edge. PowerPoint stores positions in EMU and reads
 # them back in points, so two shapes placed at the same number can differ in
