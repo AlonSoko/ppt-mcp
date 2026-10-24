@@ -447,6 +447,7 @@ def _layout_name(word):
 def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     from ppt_com.layout_check import design_key, needs_background, read_shapes
     from ppt_mac.layout import _slide_dimensions
+    from ppt_mac.slides import _slide_count
 
     app = ppt._get_app_impl()
     pres = ppt._get_pres_impl()
@@ -456,6 +457,7 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
     if detail is not None or template_cache is None:
         template_cache = {}
     themes = template_cache.setdefault("theme colours", {})
+    total = _slide_count(pres)
     for slide_index in slide_indices:
         slide = _slide(pres, slide_index)
         if navigate:
@@ -499,8 +501,17 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         design = design_key(area)
         if design not in themes:
             themes[design] = _theme_colours(slide)
+        try:
+            hidden = bool(slide.slide_show_transition.hidden())
+        except Exception:
+            hidden = False
         facts["slides"].append({
             "slide_index": slide_index,
+            "hidden": hidden,
+            "animations": _animations(slide),
+            # A Morph moves shapes onto this slide, or off it onto the next.
+            "morph": _morph(slide) or (
+                slide_index < total and _morph(_slide(pres, slide_index + 1))),
             "layout_title": (drawn or {}).get("title"),
             # From the saved file, like the right-to-left fonts it is held to.
             "theme_fonts": (drawn or {}).get("theme_fonts"),
@@ -516,6 +527,51 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "shapes": shapes,
         })
     return facts
+
+
+def _animations(slide):
+    """The slide's main sequence, as ``on_screen`` takes it.
+
+    PowerPoint for Mac does not say what starts an effect, so the trigger is
+    None and each effect counts as its own click; see ``on_screen``. None of
+    it rather than part, as on Windows.
+    """
+    from backend.mac_enums import MsoAnimEffect
+    from ppt_com.animation import _get_animation_category
+    from ppt_mac.animation import _effect_count, _effect_shape_name, _main_sequence, _read
+
+    effects = []
+    try:
+        sequence = _main_sequence(slide)
+        for i in range(1, _effect_count(sequence) + 1):
+            effect = sequence.effects[i]
+            name = _effect_shape_name(effect)
+            word = _read(effect.animation_effect_type)
+            if name is None or word is None:
+                return []
+            effects.append({
+                "shape": name,
+                "category": _get_animation_category(
+                    _windows_constant(MsoAnimEffect, word), bool(_read(effect.exit_animation))),
+                "trigger": None,
+            })
+    except Exception:
+        logger.debug("Cannot read the animations of a slide", exc_info=True)
+        return []
+    return effects
+
+
+def _morph(slide) -> bool:
+    """Whether the slide is entered with a Morph transition.
+
+    PowerPoint for Mac answers ``entry_effect_morph_by_object`` (or by word,
+    or by character), which its PpEntryEffect table here does not list.
+    """
+    try:
+        word = slide.slide_show_transition.entry_effect()
+    except Exception:
+        return False
+    return getattr(word, "name", "").startswith("entry_effect_morph")
 
 
 def _package_facts_impl(slide_indices, charts=False):

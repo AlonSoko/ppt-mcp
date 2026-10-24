@@ -45,6 +45,7 @@ from ppt_com.constants import (
     ppPlaceholderCenterTitle, ppPlaceholderDate, ppPlaceholderFooter,
     ppPlaceholderBody, ppPlaceholderHeader, ppPlaceholderObject,
     ppPlaceholderSlideNumber, ppPlaceholderTitle, ppPlaceholderVerticalTitle,
+    msoAnimTriggerAfterPrevious, msoAnimTriggerWithPrevious,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ CHECK_EACH_WRITE = _check_each_write(os.getenv("PPT_LAYOUT_CHECKS", "on"))
 # A shape may sit right on an edge; a fraction of a point past it is rounding.
 # The same allowance ppt_check_typography gives an off-slide edge.
 _EDGE_TOLERANCE = 0.5
+
+# PpEntryEffect values of the Morph transition: by object, word and character.
+MORPH_EFFECTS = frozenset({3953, 3954, 3955})
 
 # Edges this close are one edge. PowerPoint stores positions in EMU and reads
 # them back in points, so two shapes placed at the same number can differ in
@@ -871,6 +875,73 @@ def _finding(slide_index, kind, shapes, message, fix, severity="error", **extra)
     return finding
 
 
+def on_screen(animations):
+    """When each animated shape is on the screen during the slide show.
+
+    ``animations`` is the slide's main sequence in order, each effect a dict
+    of the shape's name, its category (as ``list_animations`` reports it)
+    and its trigger, None where it cannot be read. A click starts a step; an
+    effect with or after the previous one shares its step. Where the trigger
+    is unknown, as on the Mac, each effect is taken as its own click: that
+    can only keep apart shapes that really are apart, never part two that are
+    on the screen together.
+
+    The answer maps a shape that enters or leaves to the steps it is on the
+    screen for, as (from, to) pairs, ``to`` excluded. A shape with no entrance
+    or exit is on the screen throughout, and is left out.
+    """
+    step, shown = 0, {}
+    for effect in animations:
+        if effect.get("trigger") not in (msoAnimTriggerWithPrevious, msoAnimTriggerAfterPrevious):
+            step += 1
+        kind = effect.get("category")
+        if kind not in ("entrance", "exit"):
+            continue
+        spans = shown.get(effect["shape"])
+        if spans is None:
+            # Its first entrance or exit says whether it is there at the start.
+            spans = shown[effect["shape"]] = [] if kind == "entrance" else [[0, None]]
+        is_open = bool(spans) and spans[-1][1] is None
+        if kind == "entrance" and not is_open:
+            spans.append([step, None])
+        elif kind == "exit" and is_open:
+            spans[-1][1] = step
+    return {name: [(a, math.inf if b is None else b) for a, b in spans]
+            for name, spans in shown.items()}
+
+
+def moving(animations):
+    """The shapes a motion path moves during the slide show."""
+    return {effect["shape"] for effect in animations
+            if effect.get("category") == "motion_path"}
+
+
+def _together(a, b) -> bool:
+    """Whether two shapes are ever on the screen at once.
+
+    A build-up lays one line where the last one was, each shown in turn:
+    drawn on top of each other in the file, never seen so.
+    """
+    always = [(0, math.inf)]
+    return any(s < e2 and s2 < e
+               for s, e in a.get("shown") or always
+               for s2, e2 in b.get("shown") or always)
+
+
+def _parked(shape, box, slide_w, slide_h) -> bool:
+    """Whether a shape is off the slide on purpose.
+
+    One a motion path moves is judged by where it goes, not where it starts.
+    A sound's icon dragged off the slide is how it is hidden, and it still
+    plays. On a slide next to a Morph transition, a shape wholly off the slide
+    is waiting to move on, or has just moved off.
+    """
+    if shape.get("moves"):
+        return True
+    outside = box[2] <= 0 or box[0] >= slide_w or box[3] <= 0 or box[1] >= slide_h
+    return outside and (shape.get("type") == msoMedia or shape.get("morph"))
+
+
 def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
     """Shapes, or the text of shapes, that reach past an edge of the slide.
 
@@ -890,7 +961,7 @@ def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
         if not shape.get("visible", True):
             continue
         box = shape_box(shape) if _is_line(shape) else ink_box(shape)
-        if box is None:
+        if box is None or _parked(shape, box, slide_w, slide_h):
             continue
         past = {
             "left": -box[0],
@@ -1067,11 +1138,11 @@ def _overlap(slide_index, shapes, layout):
     findings, hits, seen = [], {}, set()
     for a in shapes:
         a_text = text_box(a) if a.get("visible", True) else None
-        if a_text is None or _turned(a):
+        if a_text is None or _turned(a) or a.get("moves"):
             continue
         for b in shapes:
             # Text spilling out of its own box is the overflow check's.
-            if b is a or _turned(b):
+            if b is a or _turned(b) or b.get("moves") or not _together(a, b):
                 continue
             b_ink = ink_box(b)
             if b_ink is None:
@@ -3738,7 +3809,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
     other: see ``_as_designed``.
     """
     index = slide["slide_index"]
-    shapes = _settled(slide["shapes"])
+    shapes = _animated(slide, _settled(slide["shapes"]))
     template = slide.get("template") or []
     layout = _layout(shapes, slide_w, slide_h)
     findings = (
@@ -3778,13 +3849,13 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         # Two like shapes of two sizes may be a row or a chart a model is still
         # drawing, the third bar not yet added; the slide's own check judges
         # the finished set.
-        return _sorted([
+        return _on_hidden(slide, _sorted([
             f for f in findings
             if f["type"] in SHAPE_FINDINGS and (
                 any(name in only for name in f["shapes"])
                 or (f["type"] == "low_contrast" and f["shapes"][0] in drawn_on))
             and not (f["type"] == "uneven_sizes" and len(f["shapes"]) == 2)
-        ])
+        ]))
     spacing = _uneven_spacing(index, layout, slide_w)
     # A row whose gaps are reported is put back between the margins by that
     # finding's fix, so its cards are not told about the margin as well.
@@ -3792,7 +3863,36 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
     findings = [f for f in findings
                 if not (f["type"] == "narrow_margin" and f["shapes"][0] in spaced)]
     findings += spacing + _empty_placeholders(index, shapes)
-    return _sorted(findings)
+    return _on_hidden(slide, _sorted(findings))
+
+
+def _animated(slide, shapes):
+    """The shapes, each with when it is on the screen and whether it moves.
+
+    See ``on_screen``. A slide with no animations and no Morph next to it
+    keeps its shapes as they are.
+    """
+    animations = slide.get("animations") or []
+    shown, moves = on_screen(animations), moving(animations)
+    if not (shown or moves or slide.get("morph")):
+        return shapes
+    return [{**shape, "shown": shown.get(shape["name"]),
+             "moves": shape["name"] in moves, "morph": bool(slide.get("morph"))}
+            for shape in shapes]
+
+
+def _on_hidden(slide, findings):
+    """Say so in each finding on a hidden slide.
+
+    It is still part of the deck, and shown once unhidden, so it is checked
+    like any other; the reader decides whether it matters now.
+    """
+    if not slide.get("hidden"):
+        return findings
+    for finding in findings:
+        finding["hidden_slide"] = True
+        finding["message"] += f" Slide {slide['slide_index']} is hidden in the slide show."
+    return findings
 
 
 def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
@@ -4122,8 +4222,16 @@ def _title_findings(slides, slide_h, slide_w=None):
 
 def deck_findings(slides, slide_h, slide_w=None):
     """What differs between slides that should not: titles and body text."""
-    return (_title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
-            + _titles_off_their_layout(slides))
+    findings = (_title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
+                + _titles_off_their_layout(slides))
+    hidden = {slide["slide_index"] for slide in slides if slide.get("hidden")}
+    for finding in findings:
+        odd = sorted(hidden & set(finding.get("slides") or [finding.get("slide_index")]))
+        if odd:
+            finding["hidden_slides"] = odd
+            finding["message"] += (f" {_slides(odd).capitalize()} "
+                                   f"{'is' if len(odd) == 1 else 'are'} hidden in the slide show.")
+    return findings
 
 
 # A title placeholder this far from where its layout puts it, and no further,
@@ -5132,8 +5240,16 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
         template = _template_facts(slide, touched, template_cache)
         background_hex, background_gradient = (
             _background(slide) if needs_background(shapes, detail) else (None, None))
+        try:
+            hidden = slide.SlideShowTransition.Hidden == msoTrue
+        except Exception:
+            hidden = False
         facts["slides"].append({
             "slide_index": slide_index,
+            "hidden": hidden,
+            "animations": _animations(slide),
+            # A Morph moves shapes onto this slide, or off it onto the next.
+            "morph": _morph(slide) or (slide_index < total and _morph(pres.Slides(slide_index + 1))),
             "design": design,
             "layout": layout,
             "background_hex": background_hex,
@@ -5148,6 +5264,38 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "inner": _inner_facts(shapes, refs) if detail is None else [],
         })
     return facts
+
+
+def _animations(slide):
+    """The slide's main sequence, as ``on_screen`` takes it.
+
+    None of it rather than part: a step left out would put the effects after
+    it on the wrong click. Without it the slide is checked as it is drawn.
+    """
+    from ppt_com.animation import _get_animation_category
+
+    effects = []
+    try:
+        sequence = slide.TimeLine.MainSequence
+        for i in range(1, sequence.Count + 1):
+            effect = sequence(i)
+            effects.append({
+                "shape": effect.Shape.Name,
+                "category": _get_animation_category(effect.EffectType, bool(effect.Exit)),
+                "trigger": effect.Timing.TriggerType,
+            })
+    except Exception:
+        logger.debug("Cannot read the animations of a slide", exc_info=True)
+        return []
+    return effects
+
+
+def _morph(slide) -> bool:
+    """Whether the slide is entered with a Morph transition."""
+    try:
+        return slide.SlideShowTransition.EntryEffect in MORPH_EFFECTS
+    except Exception:
+        return False
 
 
 def _package_facts_impl(slide_indices, charts=False):

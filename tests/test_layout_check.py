@@ -18,7 +18,7 @@ import pytest
 
 from ppt_com import layout_check
 from ppt_com.constants import (
-    msoAutoShape, msoFalse, msoFillSolid, msoPicture, msoPlaceholder,
+    msoAutoShape, msoFalse, msoFillSolid, msoMedia, msoPicture, msoPlaceholder,
     msoTable, msoTextBox, msoTrue,
 )
 from ppt_com.layout_check import (
@@ -3913,3 +3913,98 @@ class TestCropToFit:
         from ppt_com.advanced_ops import _fit_aspect
         with pytest.raises(ValueError, match="Supported values"):
             _fit_aspect("wide")
+
+
+# ---------------------------------------------------------------------------
+# Animations, Morph and hidden slides
+# ---------------------------------------------------------------------------
+def effect(shape_name, category, trigger=None):
+    return {"shape": shape_name, "category": category, "trigger": trigger}
+
+
+def build_up():
+    """Three lines in one place, each shown in turn, as the live probe slide
+    was built: A in, A out, B in with it; B out, C in with it."""
+    lines = [textbox(n, 120, 200, 720, 120, z=i, text_width=width, text_height=38)
+             for i, (n, width) in enumerate((("A", 600), ("B", 546), ("C", 489)), start=1)]
+    effects = [effect("A", "entrance", 1), effect("A", "exit", 1), effect("B", "entrance", 2),
+               effect("B", "exit", 1), effect("C", "entrance", 2)]
+    return lines, effects
+
+
+class TestAnimations:
+    def test_lines_shown_in_turn_in_one_place_are_not_overlapping(self):
+        lines, effects = build_up()
+        assert check(*lines) != []
+        assert slide_findings(slide(*lines) | {"animations": effects}, W, H) == []
+
+    def test_on_the_mac_each_effect_is_its_own_click_and_still_apart(self):
+        lines, effects = build_up()
+        mac = [e | {"trigger": None} for e in effects]
+        assert slide_findings(slide(*lines) | {"animations": mac}, W, H) == []
+
+    def test_a_line_left_on_the_screen_under_the_next_still_overlaps(self):
+        lines, _ = build_up()
+        effects = [effect("A", "entrance", 1), effect("B", "entrance", 1)]
+        found = slide_findings(slide(*lines[:2]) | {"animations": effects}, W, H)
+        assert kinds(found) == ["overlap"]
+
+    def test_unknown_triggers_never_part_two_shapes_on_the_screen_together(self):
+        # B comes in with A on one click on Windows: on the Mac each effect is
+        # a click of its own, and they still meet.
+        lines, _ = build_up()
+        effects = [effect("A", "entrance"), effect("B", "entrance")]
+        found = slide_findings(slide(*lines[:2]) | {"animations": effects}, W, H)
+        assert kinds(found) == ["overlap"]
+
+    def test_a_shape_that_leaves_before_the_other_comes_is_apart(self):
+        lines, _ = build_up()
+        effects = [effect("A", "exit", 1), effect("B", "entrance", 1)]
+        assert slide_findings(slide(*lines[:2]) | {"animations": effects}, W, H) == []
+
+    def test_steps_on_the_screen(self):
+        _, effects = build_up()
+        assert layout_check.on_screen(effects) == {
+            "A": [(1, 2)], "B": [(2, 3)], "C": [(3, float("inf"))]}
+
+    def test_emphasis_says_nothing_about_when_a_shape_is_there(self):
+        assert layout_check.on_screen([effect("A", "emphasis", 1)]) == {}
+
+    def test_a_shape_a_motion_path_moves_is_judged_by_where_it_goes(self):
+        parked = card("Ball", 1000, 160, 300, 200)
+        assert kinds(check(parked)) == ["off_slide"]
+        moved = slide(parked) | {"animations": [effect("Ball", "motion_path", 1)]}
+        assert slide_findings(moved, W, H) == []
+
+    def test_a_sound_dragged_off_the_slide_is_hidden_on_purpose(self):
+        sound = shape("glass", -80, 20, 48, 48, type=msoMedia)
+        assert check(sound) == []
+
+    def test_a_sound_half_off_the_slide_is_still_reported(self):
+        sound = shape("glass", -20, 20, 48, 48, type=msoMedia)
+        assert kinds(check(sound)) == ["off_slide"]
+
+    def test_a_shape_waiting_off_the_slide_for_a_morph_is_fine(self):
+        parked = card("Ball", 1000, 160, 300, 200)
+        assert slide_findings(slide(parked) | {"morph": True}, W, H) == []
+
+    def test_a_shape_half_off_a_morph_slide_is_still_reported(self):
+        half = card("Ball", 800, 160, 300, 200)
+        assert kinds(slide_findings(slide(half) | {"morph": True}, W, H)) == ["off_slide"]
+
+
+class TestHiddenSlides:
+    def test_a_finding_on_a_hidden_slide_says_it_is_hidden(self):
+        [finding] = slide_findings(slide(card("c", 900, 100, 100, 50)) | {"hidden": True}, W, H)
+        assert finding["hidden_slide"] is True
+        assert finding["message"].endswith("Slide 1 is hidden in the slide show.")
+
+    def test_a_shown_slide_says_nothing_of_it(self):
+        [finding] = check(card("c", 900, 100, 100, 50))
+        assert "hidden" not in finding["message"] and "hidden_slide" not in finding
+
+    def test_a_deck_finding_names_the_hidden_slides_among_its_own(self):
+        slides = [titled(2), titled(3), titled(4, size=36) | {"hidden": True}, titled(5)]
+        [finding] = deck_findings(slides, H)
+        assert finding["hidden_slides"] == [4]
+        assert finding["message"].endswith("Slide 4 is hidden in the slide show.")
