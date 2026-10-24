@@ -36,6 +36,7 @@ from appscript.reference import CommandError
 
 from backend.mac_ae import (
     count,
+    count_of,
     elements,
     is_missing,
     ppt,
@@ -109,6 +110,23 @@ def _require_text_frame(shape):
         raise ValueError(f"Shape '{shape.name()}' does not have a text frame")
 
 
+def _parts(text_range, each):
+    """The paragraphs or lines of a text range, a reference to each.
+
+    Asked for all of them (``text_range.paragraphs.get()``), PowerPoint answers
+    with the collection's own reference instead of a list, which ``elements``
+    takes for one paragraph however many there are: a text box of two read as
+    one. Counting them through the range answers right, and each is then
+    taken by index. ``each`` is ``k.paragraph`` or ``k.line``.
+    """
+    collection = text_range.paragraphs if each == k.paragraph else text_range.lines
+    try:
+        total = count_of(text_range, each)
+    except CommandError:
+        return elements(collection)
+    return [collection[i] for i in range(1, total + 1)]
+
+
 def _target_range(text_range, paragraph_index):
     """Return one paragraph, or the whole range when no index was given.
 
@@ -117,7 +135,7 @@ def _target_range(text_range, paragraph_index):
     """
     if paragraph_index is None:
         return text_range
-    paragraphs = elements(text_range.paragraphs)
+    paragraphs = _parts(text_range, k.paragraph)
     if paragraph_index < 1 or paragraph_index > len(paragraphs):
         raise ValueError(
             f"Paragraph index {paragraph_index} out of range "
@@ -475,7 +493,7 @@ def _shape_paragraphs_to_markdown(shape, as_heading: str = "") -> str:
     numbered = to_keyword(PpBulletType, ppBulletNumbered, "bullet type")
 
     lines = []
-    for para in elements(tr.paragraphs):
+    for para in _parts(tr, k.paragraph):
         text = _runs_to_markdown(para).strip()
         if not text:
             # Preserve empty paragraph as blank line
@@ -786,7 +804,7 @@ def _set_text_impl(slide_index: int, shape_name_or_index, text,
             "slide_index": slide_index,
             "shape_name": name,
             "text_length": tr.text_length(),
-            "paragraph_count": count(tr.paragraphs),
+            "paragraph_count": len(_parts(tr, k.paragraph)),
             "runs": [
                 {"index": i, "text": whole[run_start - 1:run_start - 1 + run_length],
                  "start": run_start, "length": run_length}
@@ -844,7 +862,7 @@ def _set_text_impl(slide_index: int, shape_name_or_index, text,
         "slide_index": slide_index,
         "shape_name": name,
         "text_length": tr.text_length(),
-        "paragraph_count": count(tr.paragraphs),
+        "paragraph_count": len(_parts(tr, k.paragraph)),
     }
 
 
@@ -863,7 +881,7 @@ def _measure_text(shape, tr):
 
     lines = []
     try:
-        line_refs = elements(tr.lines)
+        line_refs = _parts(tr, k.line)
     except Exception:
         line_refs = []
     for line in line_refs:
@@ -914,11 +932,11 @@ def _get_text_impl(slide_index: int, shape_name_or_index, measure=False) -> dict
         "shape_name": shape.name(),
         "text": _text_of(tr),
         "text_length": tr.text_length(),
-        "paragraph_count": count(tr.paragraphs),
+        "paragraph_count": len(_parts(tr, k.paragraph)),
     }
 
     paragraphs = []
-    for i, para in enumerate(elements(tr.paragraphs), start=1):
+    for i, para in enumerate(_parts(tr, k.paragraph), start=1):
         paragraphs.append({
             "index": i,
             "text": _text_of(para),
@@ -1656,7 +1674,7 @@ def _line_texts(text_range) -> list:
         return ["" if is_missing(v) else v for v in values]
     if values is not None and not is_missing(values):
         return [values]
-    return [_text_of(line) for line in elements(text_range.lines)]
+    return [_text_of(line) for line in _parts(text_range, k.line)]
 
 
 def _get_widows(shape, max_chars, max_words):
