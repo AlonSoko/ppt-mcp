@@ -3773,6 +3773,23 @@ def report_layout(result: dict, slide_index: int, shape_names) -> dict:
     return report_layouts(result, {slide_index: shape_names})
 
 
+def report_slides(result: dict, slide_indices) -> dict:
+    """report_layout for slides a write made whole, such as copies: every
+    shape on each is checked as the write's own."""
+    if not CHECK_EACH_WRITE or not isinstance(result, dict) or "error" in result:
+        return result
+    touched = {}
+    try:
+        for index in slide_indices:
+            facts = ppt.execute(_slide_facts_impl, [index], False, [], None)
+            touched[index] = [s["name"] for s in facts["slides"][0]["shapes"]]
+    except Exception as e:  # the write itself already succeeded
+        logger.debug("Layout check after a write failed", exc_info=True)
+        result["layout_check_failed"] = str(e)
+        return result
+    return report_layouts(result, touched)
+
+
 def report_layouts(result: dict, touched) -> dict:
     """report_layout for a write that touched shapes on several slides.
 

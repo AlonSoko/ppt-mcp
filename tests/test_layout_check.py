@@ -2315,22 +2315,29 @@ class TestAWritesUnreadGraphics:
 import ast  # noqa: E402
 
 REPORTING = {
-    "shapes.py": ["add_shape", "add_textbox", "add_picture", "update_shape", "duplicate_shape"],
+    "shapes.py": ["add_shape", "add_textbox", "add_picture", "update_shape", "duplicate_shape",
+                  "add_line"],
     "text.py": ["set_text", "format_text", "format_text_range", "set_textframe",
-                "find_replace_text"],
+                "find_replace_text", "set_paragraph_format", "set_bullet"],
     "advanced_ops.py": ["add_svg_icon", "add_picture_from_url", "replace_font",
-                        "set_default_fonts"],
+                        "set_default_fonts", "crop_picture", "set_picture_format"],
     "layout.py": ["align_shapes", "distribute_shapes", "set_slide_background", "set_slide_size"],
     "placeholders.py": ["set_placeholder_text"],
     "tables.py": ["add_table", "set_table_cell", "set_table_data", "add_table_row",
-                  "add_table_column", "merge_table_cells", "set_table_layout"],
-    "charts.py": ["add_chart"],
+                  "add_table_column", "merge_table_cells", "set_table_layout",
+                  "delete_table_row", "delete_table_column", "split_table_cells"],
+    "charts.py": ["add_chart", "set_chart_data"],
+    # #264: these could leave text overflowing or a shape off the slide too.
+    "groups.py": ["group_shapes"],
+    "smartart.py": ["add_smartart"],
+    "slides.py": ["copy_slide"],
     "edit_ops.py": ["copy_shape_to_slide"],
     "formatting.py": ["set_fill"],
     "batch_apply.py": ["batch_apply_formatting"],
     "themes.py": ["apply_theme", "set_theme_colors"],
 }
-REPORTERS = {"report_layout", "report_layouts", "report_contrast", "report_deck_change"}
+REPORTERS = {"report_layout", "report_layouts", "report_contrast", "report_deck_change",
+             "report_slides"}
 
 
 class TestWhichWritesReport:
@@ -2343,6 +2350,12 @@ class TestWhichWritesReport:
         called = {c.func.id for c in ast.walk(node)
                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
         assert called & REPORTERS
+
+    def test_copied_slides_are_checked_whole(self, monkeypatch):
+        stray = card("stray", 900, 100, 200, 50)
+        monkeypatch.setattr(layout_check, "ppt", FakeDeck([slide(stray, index=1), slide(stray, index=2)]))
+        result = layout_check.report_slides({"new_slide_indices": [2]}, [2])
+        assert [(f["slide_index"], f["type"]) for f in result["layout_issues"]] == [(2, "off_slide")]
 
     def test_a_copy_or_a_placeholder_is_named_by_its_own_key(self):
         assert touched_names({"new_shape_name": "Card copy"}) == ["Card copy"]
