@@ -864,7 +864,9 @@ def _add_picture_impl(slide_index, file_path, left, top, width, height,
         SaveWithDocument=msoTrue,
         Left=left, Top=top, Width=-1, Height=-1,
     )
-    natural = _file_aspect(file_path) or (pic.Width / pic.Height if pic.Height else None)
+    pixels = _file_pixels(file_path)
+    natural = (pixels[0] / pixels[1] if pixels else None) or (
+        pic.Width / pic.Height if pic.Height else None)
     if width is not None and height is not None:
         # Both specified: user intentionally overrides aspect ratio.
         pic.LockAspectRatio = msoFalse
@@ -884,14 +886,15 @@ def _add_picture_impl(slide_index, file_path, left, top, width, height,
         "width": round(pic.Width, 2),
         "height": round(pic.Height, 2),
         **placed,
-        # The image's own proportions, for the layout check; report_layout
-        # takes it out of the result.
+        # The image's own proportions and size, for the layout check;
+        # report_layout takes them out of the result.
         "_natural_aspect": natural,
+        "_pixels": pixels,
     }
 
 
-def _file_aspect(path):
-    """An image file's width over its height, or None when it cannot be read."""
+def _file_pixels(path):
+    """An image file's width and height in pixels, or None when it cannot be read."""
     from utils.package import image_size
 
     try:
@@ -899,7 +902,7 @@ def _file_aspect(path):
             size = image_size(handle.read())
     except OSError:
         return None
-    return size[0] / size[1] if size and size[1] else None
+    return size if size and size[0] and size[1] else None
 
 
 def _add_line_impl(slide_index, begin_x, begin_y, end_x, end_y,

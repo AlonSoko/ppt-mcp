@@ -217,11 +217,13 @@ SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
     "text_direction", "mixed_direction", "stretched_picture", "title_edge", "font_missing",
+    "small_text", "blurry_picture",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
-    "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
+    "off_slide", "overflow", "overlap", "stretched_picture", "blurry_picture", "low_contrast",
+    "small_text", "cramped_text",
     "narrow_margin", "misaligned", "title_edge", "uneven_spacing", "uneven_sizes",
     "number_order", "text_direction", "mixed_direction", "font_missing", "empty_placeholder",
     "sample_text",
@@ -3654,6 +3656,83 @@ def _stretched(slide_index, shapes, slide_area=None):
     return findings
 
 
+# Text smaller than this is hard to read when the slide is projected. A
+# designed deck sets its labels and source lines in 10 or 11 pt; below that is
+# text squeezed to fit.
+_SMALLEST_TEXT = 10.0
+
+# What PowerPoint puts in a slide's corners itself, set small on purpose.
+_SMALL_BY_DESIGN = frozenset({ppPlaceholderDate, ppPlaceholderFooter, ppPlaceholderSlideNumber})
+
+
+def _small_text(slide_index, shapes):
+    """Text set too small to read when the slide is projected.
+
+    Judged by the smallest size in the shape: a line in 9 pt under a heading
+    in 24 is the line the back of the room cannot read. The date, footer and
+    slide number are left alone; they are small by design.
+    """
+    findings = []
+    for shape in shapes:
+        text = shape.get("text") or {}
+        if (not shape.get("visible", True) or not text.get("chars")
+                or shape.get("placeholder_type") in _SMALL_BY_DESIGN):
+            continue
+        sizes = [run["size"] for run in text.get("runs") or [] if run.get("size")]
+        if not sizes or min(sizes) >= _SMALLEST_TEXT - 0.05:
+            continue
+        name, smallest = shape["name"], min(sizes)
+        shrunk = text.get("autofit") == "shrink_to_fit"
+        fix = (f"Set it to at least {_num(_SMALLEST_TEXT)} pt (ppt_format_text "
+               f"shape_name_or_index='{name}' font_size={_num(_SMALLEST_TEXT)})")
+        if shrunk:
+            fix += (". PowerPoint shrinks it to fit its box, so give it the room as well "
+                    "(ppt_update_shape), or say less")
+        findings.append(_finding(
+            slide_index, "small_text", [name],
+            f"Text in '{name}' is set in {_pt(smallest)}, too small to read when the "
+            f"slide is projected; {_pt(_SMALLEST_TEXT)} is about the smallest that is.",
+            f"{fix}.", severity="warning", size=smallest,
+        ))
+    return findings
+
+
+# A picture drawn larger than one of its image's pixels to a point is spread
+# thin, and soft on a projector.
+_PIXELS_PER_POINT = 1.0
+
+
+def _blurry(slide_index, shapes):
+    """A picture drawn larger than its image has pixels for."""
+    findings = []
+    for shape in shapes:
+        pixels = shape.get("pixels")
+        if (not pixels or shape.get("type") not in _PICTURES or not shape.get("visible", True)
+                or shape["width"] <= 0 or shape["height"] <= 0):
+            continue
+        across, down = pixels
+        density = min(across / shape["width"], down / shape["height"])
+        if density >= _PIXELS_PER_POINT:
+            continue
+        name = shape["name"]
+        width = shape["width"] * density / _PIXELS_PER_POINT
+        height = shape["height"] * density / _PIXELS_PER_POINT
+        left = shape["left"] + (shape["width"] - width) / 2
+        top = shape["top"] + (shape["height"] - height) / 2
+        findings.append(_finding(
+            slide_index, "blurry_picture", [name],
+            f"'{name}' is drawn {_pt(shape['width'])} by {_pt(shape['height'])} from an "
+            f"image {round(across)} by {round(down)} pixels, so it looks soft when the "
+            f"slide is projected.",
+            f"Use a larger image, at least {math.ceil(shape['width'] * _PIXELS_PER_POINT)} "
+            f"pixels across, or draw it at most {_pt(width)} by {_pt(height)}, keeping "
+            f"its centre (ppt_update_shape width={_num(width)} height={_num(height)} "
+            f"left={_num(left)} top={_num(top)}).",
+            severity="warning", pixels_per_point=round(density, 2),
+        ))
+    return findings
+
+
 # The names PowerPoint gives a new chart's categories and series.
 _SAMPLE_CATEGORY = re.compile(r"^Category \d+$")
 # The pie's sample quarters are also what a real quarterly chart is called, so
@@ -3832,6 +3911,8 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _chart_sample_data(index, shapes)
         + _fonts(index, shapes, slide.get("theme_fonts"))
         + _stretched(index, shapes, slide_w * slide_h)
+        + _blurry(index, shapes)
+        + _small_text(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
         + _mixed_direction(index, shapes)
@@ -3922,7 +4003,8 @@ def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
                 + _number_order(index, inner)
                 + _text_direction(index, inner)
                 + _mixed_direction(index, inner)
-                + _fonts(index, inner, slide.get("theme_fonts")))
+                + _fonts(index, inner, slide.get("theme_fonts"))
+                + _small_text(index, inner))
     unreachable = {s["name"]: s for s in inner if s.get("reachable") is False}
     for finding in findings:
         member = unreachable.get(finding["shapes"][0])
@@ -5495,8 +5577,11 @@ def _with_package(slides, facts):
     for slide in slides:
         index = slide["slide_index"]
         aspects = (facts.get("pictures") or {}).get(index) or {}
+        pixels = (facts.get("pixels") or {}).get(index) or {}
         charts = (facts.get("charts") or {}).get(index) or {}
         for shape in slide["shapes"]:
+            if shape.get("type") in _PICTURES and shape["name"] in pixels:
+                shape["pixels"] = pixels[shape["name"]]
             if shape.get("type") in _PICTURES and shape["name"] in aspects:
                 shape["natural_aspect"] = aspects[shape["name"]]
             elif shape.get("type") == msoChart and shape["name"] in charts:
@@ -5554,12 +5639,13 @@ def check_layout(params: CheckLayoutInput) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _issues_for(slide_index, shapes, aspects=None):
+def _issues_for(slide_index, shapes, aspects=None, pixels=None):
     """The per-shape findings on one slide for the shapes a write touched.
 
     ``shapes`` are names, or 1-based positions for a tool that was given one;
     a position is turned into its name from a read of the slide's geometry.
-    ``aspects`` are pictures' own proportions the write already knows.
+    ``aspects`` are pictures' own proportions the write already knows, and
+    ``pixels`` their images' sizes.
     """
     names = {s for s in shapes if isinstance(s, str) and s}
     positions = {s for s in shapes if isinstance(s, int) and not isinstance(s, bool)}
@@ -5570,12 +5656,13 @@ def _issues_for(slide_index, shapes, aspects=None):
         return []
     facts = ppt.execute(_slide_facts_impl, [slide_index], False, sorted(names), None)
     slides = facts["slides"]
-    known = dict(aspects or {})
+    known, sizes = dict(aspects or {}), dict(pixels or {})
     unknown = {n for n in names if n not in known}
     if _has_pictures(slides, unknown):
-        read = _read_package([slide_index]).get("pictures") or {}
-        known = {**read.get(slide_index, {}), **known}
-    _with_package(slides, {"pictures": {slide_index: known}})
+        read = _read_package([slide_index])
+        known = {**(read.get("pictures") or {}).get(slide_index, {}), **known}
+        sizes = {**(read.get("pixels") or {}).get(slide_index, {}), **sizes}
+    _with_package(slides, {"pictures": {slide_index: known}, "pixels": {slide_index: sizes}})
     _with_fonts(slides, _read_fonts)
     return slide_findings(slides[0], facts["slide_width"], facts["slide_height"],
                           only=names)
@@ -5600,6 +5687,7 @@ def report_layouts(result: dict, touched) -> dict:
     """
     # What a write hands the check is not for its caller, checked or not.
     natural = result.pop("_natural_aspect", None) if isinstance(result, dict) else None
+    size = result.pop("_pixels", None) if isinstance(result, dict) else None
     if not CHECK_EACH_WRITE:
         return result
     touched = {index: [s for s in shapes if s not in (None, "")]
@@ -5608,10 +5696,11 @@ def report_layouts(result: dict, touched) -> dict:
     if not touched or not isinstance(result, dict) or "error" in result:
         return result
     aspects = {result["shape_name"]: natural} if natural and result.get("shape_name") else None
+    pixels = {result["shape_name"]: size} if size and result.get("shape_name") else None
     issues = []
     try:
         for slide_index in sorted(touched):
-            issues += _issues_for(slide_index, touched[slide_index], aspects)
+            issues += _issues_for(slide_index, touched[slide_index], aspects, pixels)
     except Exception as e:  # noqa: BLE001 - the write itself already succeeded
         logger.debug("Layout check after a write failed", exc_info=True)
         result["layout_check_failed"] = str(e)

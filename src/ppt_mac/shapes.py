@@ -865,9 +865,10 @@ def _add_picture_impl(slide_index, file_path, left, top, width, height,
         "width": size[0],
         "height": size[1],
         **placed,
-        # The image's own proportions, for the layout check; report_layout
-        # takes it out of the result.
+        # The image's own proportions and size, for the layout check;
+        # report_layout takes them out of the result.
         "_natural_aspect": natural,
+        "_pixels": pixels,
     }
 
 

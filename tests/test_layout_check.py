@@ -4008,3 +4008,67 @@ class TestHiddenSlides:
         [finding] = deck_findings(slides, H)
         assert finding["hidden_slides"] == [4]
         assert finding["message"].endswith("Slide 4 is hidden in the slide show.")
+
+
+# ---------------------------------------------------------------------------
+# Small text and blurry pictures
+# ---------------------------------------------------------------------------
+def sized(name, size, **extra):
+    runs = [{"color_hex": "#222222", "size": size, "bold": False}]
+    return textbox(name, 100, 100, 400, 60, runs=runs, **extra)
+
+
+class TestSmallText:
+    def test_text_under_ten_points_is_reported(self):
+        [finding] = check(sized("note", 9))
+        assert finding["type"] == "small_text"
+        assert finding["severity"] == "warning"
+        assert "9 pt" in finding["message"]
+        assert "ppt_format_text shape_name_or_index='note' font_size=10" in finding["fix"]
+
+    def test_a_label_or_source_line_in_ten_or_eleven_points_is_fine(self):
+        # The recorded designed decks set their labels in 11 pt and their
+        # sources and footnotes in 10 or 11.
+        assert check(sized("note", 10)) == []
+        assert check(sized("note", 11)) == []
+
+    def test_the_smallest_run_is_the_one_judged(self):
+        runs = [{"color_hex": "#222222", "size": 24.0}, {"color_hex": "#222222", "size": 8.0}]
+        assert kinds(check(textbox("t", 100, 100, 400, 60, runs=runs))) == ["small_text"]
+
+    def test_the_footer_and_slide_number_are_small_by_design(self):
+        for kind in (layout_check.ppPlaceholderFooter, layout_check.ppPlaceholderSlideNumber):
+            footer = sized("Footer", 9) | {"type": msoPlaceholder, "placeholder_type": kind}
+            assert check(footer) == []
+
+    def test_text_powerpoint_shrinks_is_told_to_have_room_too(self):
+        [finding] = check(sized("note", 8, autofit="shrink_to_fit"))
+        assert "give it the room as well" in finding["fix"]
+
+    def test_a_write_reports_it_on_the_shape_it_touched(self):
+        found = slide_findings(slide(sized("note", 9)), W, H, only={"note"})
+        assert kinds(found) == ["small_text"]
+
+
+def photo(width, height, pixels):
+    return shape("Photo", 100, 100, width, height, type=msoPicture, pixels=pixels)
+
+
+class TestBlurryPictures:
+    def test_a_small_image_drawn_large_is_reported(self):
+        [finding] = check(photo(480, 270, (320, 180)))
+        assert finding["type"] == "blurry_picture"
+        assert "320 by 180 pixels" in finding["message"]
+        assert "at least 480 pixels across" in finding["fix"]
+        # Drawn at 320 by 180, about the same centre.
+        assert "ppt_update_shape width=320 height=180 left=180 top=145" in finding["fix"]
+
+    def test_an_image_with_a_pixel_to_the_point_is_sharp_enough(self):
+        assert check(photo(480, 270, (480, 270))) == []
+
+    def test_a_picture_whose_image_is_not_known_is_not_judged(self):
+        assert check(photo(480, 270, None)) == []
+
+    def test_a_cropped_image_counts_only_the_part_shown(self):
+        # The pixels are those of the part shown, as the saved file gives them.
+        assert kinds(check(photo(480, 270, (400, 225)))) == ["blurry_picture"]

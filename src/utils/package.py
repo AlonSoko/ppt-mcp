@@ -131,7 +131,8 @@ def _unique(found, name, value, seen):
         found[name] = value
 
 
-def _picture_aspect(archive, pic, media):
+def _picture_pixels(archive, pic, media):
+    """The pixels across and down the part of a picture's image it shows."""
     fill = pic.find("p:blipFill", _NS)
     if fill is None:
         return None
@@ -151,7 +152,7 @@ def _picture_aspect(archive, pic, media):
             cut[side] = int(crop.get(side, "0")) / 100000
     width = size[0] * (1 - cut["l"] - cut["r"])
     height = size[1] * (1 - cut["t"] - cut["b"])
-    return width / height if width > 0 and height > 0 else None
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def _chart(archive, frame, parts):
@@ -176,28 +177,30 @@ _CHART = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 def package_facts(path, slide_indices):
     """What the saved file says that PowerPoint will not.
 
-    ``{"pictures": {slide: {name: aspect}}, "charts": {slide: {name: data}}}``.
-    A picture's aspect is its image's width over its height, as cropped; a
-    chart's data is what ``gvml.charts.read_chart`` reads. A picture whose
+    ``{"pictures": {slide: {name: aspect}}, "pixels": {slide: {name: (w, h)}},
+    "charts": {slide: {name: data}}}``. A picture's aspect is its image's
+    width over its height, as cropped, and its pixels are those of the part
+    shown; a chart's data is what ``gvml.charts.read_chart`` reads. A picture whose
     image cannot be measured, one filled as a tile, and names used twice on
     a slide are left out, so an absent entry always means unknown.
     """
-    pictures, charts = {}, {}
+    pictures, pixels, charts = {}, {}, {}
     with zipfile.ZipFile(path) as archive:
         for index, slide, parts in _slides(archive, slide_indices):
-            aspects, data, seen = {}, {}, set()
+            aspects, sizes, data, seen, measured = {}, {}, {}, set(), set()
             for element in slide.iter():
                 if element.tag == "{%s}pic" % _NS["p"]:
                     props = element.find("p:nvPicPr/p:cNvPr", _NS)
                     if props is not None:
-                        _unique(aspects, props.get("name"),
-                                _picture_aspect(archive, element, parts), seen)
+                        size = _picture_pixels(archive, element, parts)
+                        _unique(sizes, props.get("name"), size, measured)
+                        _unique(aspects, props.get("name"), size and size[0] / size[1], seen)
                 elif element.tag == "{%s}graphicFrame" % _NS["p"]:
                     props = element.find("p:nvGraphicFramePr/p:cNvPr", _NS)
                     if props is not None:
                         _unique(data, props.get("name"), _chart(archive, element, parts), seen)
-            pictures[index], charts[index] = aspects, data
-    return {"pictures": pictures, "charts": charts}
+            pictures[index], pixels[index], charts[index] = aspects, sizes, data
+    return {"pictures": pictures, "pixels": pixels, "charts": charts}
 
 
 def picture_aspects(path, slide_indices):
