@@ -194,6 +194,29 @@ class TestOffSlide:
     def test_half_a_point_is_rounding(self):
         assert check(card("c", 860.4, 100, 100, 50)) == []
 
+    def test_a_full_bleed_background_is_meant_to_hang_over(self):
+        # #264: left=-2, width=962 was an error, and its fix (left=0) left it
+        # 2 pt over the right edge, to be reported again.
+        assert check(card("bg", -2, 0, 962, 540, colour="#EEEEEE")) == []
+
+    def test_a_band_past_both_sides_is_a_bleed_too(self):
+        assert check(*titled_row(), card("band", -10, 470, 980, 60, z=9)) == []
+
+    def test_but_words_off_the_slide_are_still_reported(self):
+        across = textbox("t", -20, 100, 1000, 50, text_width=990)
+        [finding] = check(across)
+        assert "wider than the slide" in finding["fix"]
+        assert "ppt_update_shape left=0 width=960" in finding["fix"]
+
+    def test_a_shape_wider_than_the_margins_allow_is_fitted_not_moved(self):
+        # Moved right by its overshoot and the margin, a 900 pt card between
+        # 40 pt margins would run past the right edge.
+        row = titled_row()
+        [finding] = check(*row, card("wide", -10, 470, 900, 50, z=9))
+        assert "wider than the 880 pt between the margins" in finding["fix"]
+        assert "ppt_update_shape left=40 width=880" in finding["fix"]
+        assert check(*row, card("wide", 40, 470, 880, 50, z=9)) == []
+
     def test_a_rotated_shape_is_measured_by_the_box_around_it(self):
         bar = card("bar", 380, 200, 200, 20) | {"rotation": 90.0}
         assert check(bar) == []

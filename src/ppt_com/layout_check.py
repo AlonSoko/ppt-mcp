@@ -859,6 +859,21 @@ def _finding(slide_index, kind, shapes, message, fix, severity="error", **extra)
     return finding
 
 
+def _bleeds(shape, box, low, high, start, end) -> bool:
+    """Whether a shape runs edge to edge along one axis on purpose.
+
+    A background or a band drawn across the whole slide often hangs a point
+    or two over, or well past both edges: nothing of it is lost, since what
+    is past the edge was never meant to show. Its words, if any, still have
+    to be on the slide.
+    """
+    if not paints_box(shape) or box[low] > start + _EDGE_TOLERANCE or box[high] < end - _EDGE_TOLERANCE:
+        return False
+    words = text_box(shape)
+    return words is None or (words[low] >= start - _EDGE_TOLERANCE
+                             and words[high] <= end + _EDGE_TOLERANCE)
+
+
 def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
     """Shapes, or the text of shapes, that reach past an edge of the slide.
 
@@ -888,17 +903,30 @@ def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
         }
         past = {edge: round(amount, 1) for edge, amount in past.items()
                 if amount > _EDGE_TOLERANCE}
+        for low, high, start, end in ((0, 2, 0.0, slide_w), (1, 3, 0.0, slide_h)):
+            if _bleeds(shape, box, low, high, start, end):
+                for edge in (("left", "right") if low == 0 else ("top", "bottom")):
+                    past.pop(edge, None)
         if not past:
             continue
         parts = [f"{_pt(amount)} past the {edge} edge" for edge, amount in past.items()]
         name = shape["name"]
-        moves, calls, kept, too_big = [], [], [], []
-        for low, high, field, keep, words, bigger in (
-            ("left", "right", "left", margins.get("horizontal"), ("right", "left"), "wider"),
-            ("top", "bottom", "top", margins.get("vertical"), ("down", "up"), "taller"),
+        moves, calls, kept, too_big, fits = [], [], [], [], []
+        for low, high, field, size, keep, words, bigger, span in (
+            ("left", "right", "left", "width", margins.get("horizontal"), ("right", "left"),
+             "wider", slide_w),
+            ("top", "bottom", "top", "height", margins.get("vertical"), ("down", "up"),
+             "taller", slide_h),
         ):
-            if low in past and high in past:
-                too_big.append(bigger)
+            if low not in past and high not in past:
+                continue
+            room = span - 2 * (keep or 0.0)
+            if (low in past and high in past) or shape[size] > room + _EDGE_TOLERANCE:
+                # No move puts it inside the margins: moved off one edge, it
+                # runs off the other. It is brought to the margin and given
+                # the room between the margins.
+                (too_big if low in past and high in past else fits).append(
+                    (bigger, field, size, keep or 0.0, room))
                 continue
             for edge, sign, word in ((low, 1, words[0]), (high, -1, words[1])):
                 if edge not in past:
@@ -914,8 +942,19 @@ def _off_slide(slide_index, shapes, slide_w, slide_h, layout):
             # Moved, centred text would leave what it is centred on.
             centred = _centred_fit(shape, keep, slide_w - keep) or _centred_shorten(
                 shape, keep, slide_w - keep)
-        if too_big:
-            fix = f"'{name}' is {' and '.join(too_big)} than the slide: make it smaller."
+        if too_big or fits:
+            sized = too_big + fits
+            what = " and ".join(
+                f"{bigger} than the slide" if (bigger, field, size, keep, room) in too_big
+                else f"{bigger} than the {_pt(room)} between the margins the rest of the "
+                     f"slide keeps"
+                for bigger, field, size, keep, room in sized)
+            calls += [f"{field}={_num(keep)} {size}={_num(room)}"
+                      for _, field, size, keep, room in sized]
+            why = ("no move puts it on the slide" if too_big
+                   else "moving it back would run it past the other edge")
+            fix = (f"'{name}' is {what}, so {why}: bring it to the margin and make it "
+                   f"fit (ppt_update_shape {' '.join(calls)}).")
         elif centred:
             fix = centred
         else:
