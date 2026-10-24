@@ -819,21 +819,23 @@ def _grow(card, side, amount, layout):
     """The fix that gives ``card`` ``amount`` more room on ``side``.
 
     The rest of its row grows with it when the room is height, and the rest
-    of its column when it is width, so like cards stay one size.
+    of its column when it is width, so like cards stay one size. The call is
+    relative, so each card grows from where it is: a row set out in steps
+    keeps its steps.
     """
-    name, box = card["name"], layout["boxes"][card["name"]]
+    name = card["name"]
     if side in ("top", "bottom"):
         word, group = "taller", "row"
-        call = f"height={_num(_height(box) + amount)}"
+        call = f"dheight={_num(amount)}"
         mates = layout["rows"].get(name, [])
     else:
         word, group = "wider", "column"
-        call = f"width={_num(_width(box) + amount)}"
+        call = f"dwidth={_num(amount)}"
         mates = layout["columns"].get(name, [])
     if side == "top":
-        call += f" top={_num(box[1] - amount)}"
+        call += f" dtop={_num(-amount)}"
     elif side == "left":
-        call += f" left={_num(box[0] - amount)}"
+        call += f" dleft={_num(-amount)}"
     others = [m for m in mates if m != name]
     if not others:
         return f"make '{name}' {_pt(amount)} {word} (ppt_update_shape {call})"

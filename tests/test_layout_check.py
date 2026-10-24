@@ -283,7 +283,7 @@ class TestOverlap:
         [finding] = [f for f in check(*titled_row(), spill()) if f["type"] == "overlap"]
         assert finding["past_edges"] == {"bottom": 25.6}
         assert "make 'card0' 39.2 pt taller" in finding["fix"].lower()
-        assert "shape_names=['card0', 'card1', 'card2'] height=219.2" in finding["fix"]
+        assert "shape_names=['card0', 'card1', 'card2'] dheight=39.2" in finding["fix"]
         assert "13.6 pt below, as it has above" in finding["fix"]
 
     def test_two_filled_shapes_crossing_are_left_alone(self):
@@ -535,8 +535,18 @@ class TestCrampedText:
         [finding] = [f for f in found if f["type"] == "cramped_text"]
         assert finding["shapes"] == ["words", "card0"]
         assert "0 pt from the bottom edge of 'card0', with 13.6 pt above" in finding["message"]
-        assert "shape_names=['card0', 'card1', 'card2'] height=219.2" in finding["fix"]
+        assert "shape_names=['card0', 'card1', 'card2'] dheight=13.6" in finding["fix"]
         assert "overlap" not in kinds(found)
+
+    def test_a_row_set_out_in_steps_keeps_its_steps(self):
+        # #264: one absolute top= and height= for the row flattened cards
+        # set at different heights. Each grows from where it is.
+        title = textbox("title", 40, 30, 880, 55.74, z=1, text_width=300, text_height=48)
+        row = [card(f"card{i}", left, 140 + 10 * i, 280, 205.6, z=2 + i)
+               for i, left in enumerate((40, 340, 640))]
+        [finding] = [f for f in check(title, *row, spill()) if f["type"] == "cramped_text"]
+        assert "dheight=13.6" in finding["fix"]
+        assert " top=" not in finding["fix"] and " height=" not in finding["fix"]
 
     def test_evenly_padded_text_is_fine(self):
         assert check(*titled_row(heights=(220, 220, 220)), spill()) == []
