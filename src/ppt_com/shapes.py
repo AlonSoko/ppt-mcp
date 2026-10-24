@@ -433,6 +433,14 @@ class UpdateShapeInput(BaseModel):
     dwidth: Optional[float] = Field(default=None, description="Widen by this many points, relative to the current width.")
     dheight: Optional[float] = Field(default=None, description="Heighten by this many points, relative to the current height.")
     name: Optional[str] = Field(default=None, description="New name for the shape")
+    alt_text: Optional[str] = Field(
+        default=None,
+        description=(
+            "Alt text: what a screen reader says for the shape, such as a picture "
+            "or chart. One shape at a time. Windows only: PowerPoint for Mac does "
+            "not let a script set it."
+        ),
+    )
     adjustments: Optional[dict[int, float]] = Field(
         default=None,
         description=(
@@ -493,10 +501,10 @@ class UpdateShapeInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_single_shape_only_fields(self):
-        # A rename would make duplicates, and adjustment handles mean
-        # different things on different shapes.
+        # A rename would make duplicates, adjustment handles mean different
+        # things on different shapes, and alt text describes one.
         if self.all or self.shape_names:
-            for field in ("name", "adjustments"):
+            for field in ("name", "adjustments", "alt_text"):
                 if getattr(self, field) is not None:
                     raise ValueError(
                         f"{field} applies to one shape, so it cannot be used "
@@ -1351,7 +1359,7 @@ def _update_many_impl(slide_index, shape_names, all_shapes, exclude,
 
 def _update_shape_impl(slide_index, shape_name, shape_index, left, top, width, height,
                        rotation, name, adjustments,
-                       dleft=None, dtop=None, dwidth=None, dheight=None):
+                       dleft=None, dtop=None, dwidth=None, dheight=None, alt_text=None):
     app = ppt._get_app_impl()
     goto_slide(app, slide_index)
     pres = ppt._get_pres_impl()
@@ -1362,6 +1370,8 @@ def _update_shape_impl(slide_index, shape_name, shape_index, left, top, width, h
                     dleft, dtop, dwidth, dheight)
     if name is not None:
         shape.Name = name
+    if alt_text is not None:
+        shape.AlternativeText = alt_text
 
     # Apply adjustment handle values.
     if adjustments:
@@ -1388,6 +1398,8 @@ def _update_shape_impl(slide_index, shape_name, shape_index, left, top, width, h
         "width": round(shape.Width, 2),
         "height": round(shape.Height, 2),
     }
+    if alt_text is not None:
+        result["alt_text"] = shape.AlternativeText
 
     # Include current adjustment values in response when adjustments were set.
     if adjustments:
@@ -1671,6 +1683,7 @@ def update_shape(params: UpdateShapeInput) -> str:
                 params.left, params.top, params.width, params.height,
                 params.rotation, params.name, params.adjustments,
                 params.dleft, params.dtop, params.dwidth, params.dheight,
+                params.alt_text,
             )
         report_layout(result, params.slide_index, touched_names(result))
         return json.dumps(result)

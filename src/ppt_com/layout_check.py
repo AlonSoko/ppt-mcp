@@ -32,7 +32,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend import ppt
+from backend import IS_MACOS, ppt
 from utils.color import int_to_hex
 from utils.navigation import goto_slide
 from utils.offload import run_offloaded
@@ -224,11 +224,12 @@ SHAPE_FINDINGS = frozenset({
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "blurry_picture", "low_contrast",
-    "small_text", "cramped_text",
+    "small_text", "cramped_text", "chart_overlap",
     "narrow_margin", "misaligned", "title_edge", "uneven_spacing", "uneven_sizes",
     "number_order", "text_direction", "mixed_direction", "font_missing", "empty_placeholder",
     "sample_text",
-    "chart_sample_data",
+    "chart_sample_data", "missing_alt_text",
+    "missing_title", "duplicate_titles",
     "inconsistent_titles",
     "inconsistent_body_text",
 )
@@ -3680,19 +3681,34 @@ def _small_text(slide_index, shapes):
                 or shape.get("placeholder_type") in _SMALL_BY_DESIGN):
             continue
         sizes = [run["size"] for run in text.get("runs") or [] if run.get("size")]
-        if not sizes or min(sizes) >= _SMALLEST_TEXT - 0.05:
+        # Text set to shrink to fit is judged by the saved file: how far
+        # PowerPoint shrank it, and the size it is set in when the file says.
+        # Read live, both platforms give the size already shrunk (18 pt at
+        # 70% reads as 13), and PowerPoint for Mac cannot say it shrinks.
+        shrunk = shape.get("shrunk") or {}
+        scale = shrunk.get("scale") or 1.0
+        set_in = shrunk.get("smallest")
+        if set_in is None and sizes:
+            set_in = min(sizes) / scale
+        if set_in is None or set_in * scale >= _SMALLEST_TEXT - 0.05:
             continue
-        name, smallest = shape["name"], min(sizes)
-        shrunk = text.get("autofit") == "shrink_to_fit"
-        fix = (f"Set it to at least {_num(_SMALLEST_TEXT)} pt (ppt_format_text "
-               f"shape_name_or_index='{name}' font_size={_num(_SMALLEST_TEXT)})")
-        if shrunk:
-            fix += (". PowerPoint shrinks it to fit its box, so give it the room as well "
-                    "(ppt_update_shape), or say less")
+        name, smallest = shape["name"], round(set_in * scale, 1)
+        if scale < 1.0:
+            drawn = (f"set in {_pt(round(set_in, 1))} and shrunk by PowerPoint to "
+                     f"{_pt(smallest)} to fit its box")
+            fix = (f"Give it the room its words need at {_num(_SMALLEST_TEXT)} pt or more: a "
+                   f"bigger box (ppt_update_shape), fewer words, or both")
+        else:
+            drawn = f"set in {_pt(smallest)}"
+            fix = (f"Set it to at least {_num(_SMALLEST_TEXT)} pt (ppt_format_text "
+                   f"shape_name_or_index='{name}' font_size={_num(_SMALLEST_TEXT)})")
+            if text.get("autofit") == "shrink_to_fit":
+                fix += (". PowerPoint shrinks it to fit its box, so give it the room as well "
+                        "(ppt_update_shape), or say less")
         findings.append(_finding(
             slide_index, "small_text", [name],
-            f"Text in '{name}' is set in {_pt(smallest)}, too small to read when the "
-            f"slide is projected; {_pt(_SMALLEST_TEXT)} is about the smallest that is.",
+            f"Text in '{name}' is {drawn}, too small to read when the slide is "
+            f"projected; {_pt(_SMALLEST_TEXT)} is about the smallest that is.",
             f"{fix}.", severity="warning", size=smallest,
         ))
     return findings
@@ -3730,6 +3746,86 @@ def _blurry(slide_index, shapes):
             f"its centre (ppt_update_shape width={_num(width)} height={_num(height)} "
             f"left={_num(left)} top={_num(top)}).",
             severity="warning", pixels_per_point=round(density, 2),
+        ))
+    return findings
+
+
+def _missing_alt_text(slide_index, shapes):
+    """A picture, chart or SmartArt with no alt text for a screen reader.
+
+    Known only from the saved file; one whose file says nothing is left
+    alone. A picture marked as decoration needs none, and alt text that is
+    only the image's file name says nothing.
+    """
+    findings = []
+    for shape in shapes:
+        if shape.get("described") is not False or not shape.get("visible", True):
+            continue
+        name = shape["name"]
+        if IS_MACOS:
+            fix = (f"Describe what it shows in PowerPoint: right-click '{name}', View Alt "
+                   "Text. PowerPoint for Mac does not let a tool set it; on Windows, "
+                   f"ppt_update_shape shape_name='{name}' alt_text='...' does.")
+        else:
+            fix = (f"Describe what it shows, in a sentence: ppt_update_shape "
+                   f"shape_name='{name}' alt_text='...'.")
+        findings.append(_finding(
+            slide_index, "missing_alt_text", [name],
+            f"'{name}' has no alt text, so a screen reader cannot say what it shows.",
+            fix, severity="warning",
+        ))
+    return findings
+
+
+# Chart parts sharing less than this, either way, only touch.
+_CHART_TOUCH = 2.0
+
+
+def _chart_overlaps(slide_index, shapes):
+    """Parts of a chart drawn over each other: data labels, the legend, the
+    title and the plot.
+
+    PowerPoint lays a chart out itself, and with small slices or many points
+    its labels land on each other; a legend or title moved by hand can sit
+    on the bars. Read on Windows only: PowerPoint for Mac has no chart
+    object to ask.
+    """
+    def meet(a, b):
+        width, height = _shared(a, b)
+        return width > _CHART_TOUCH and height > _CHART_TOUCH
+
+    findings = []
+    for shape in shapes:
+        parts = shape.get("chart_parts")
+        if not parts or not shape.get("visible", True):
+            continue
+        name, problems, fixes = shape["name"], [], []
+        labels = parts.get("labels") or []
+        crowded = {i for i, a in enumerate(labels) for j, b in enumerate(labels)
+                   if i < j and meet(a, b)} | {j for i, a in enumerate(labels)
+                                               for j, b in enumerate(labels)
+                                               if i < j and meet(a, b)}
+        if crowded:
+            problems.append(f"{len(crowded)} of its {len(labels)} data labels run into each other")
+            fixes.append("make the chart larger, show labels on fewer series "
+                         "(ppt_set_chart_series show_data_labels=false), or put the small "
+                         "values together")
+        legend, plot, title = parts.get("legend"), parts.get("plot"), parts.get("title")
+        if legend and plot and meet(legend, plot):
+            problems.append("its legend lies on the plot")
+            fixes.append(f"put the legend beside the plot (ppt_format_chart "
+                         f"shape_name_or_index='{name}' legend_position='bottom')")
+        if title and (plot and meet(title, plot) or legend and meet(title, legend)):
+            problems.append("its title lies on the plot or the legend")
+            fixes.append(f"put the title back above the plot (ppt_format_chart "
+                         f"shape_name_or_index='{name}' title_position='top')")
+        if not problems:
+            continue
+        findings.append(_finding(
+            slide_index, "chart_overlap", [name],
+            f"In '{name}', {'; '.join(problems)}.",
+            f"{'; '.join(fixes)[0].upper()}{'; '.join(fixes)[1:]}.",
+            severity="warning",
         ))
     return findings
 
@@ -3914,6 +4010,8 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _stretched(index, shapes, slide_w * slide_h)
         + _blurry(index, shapes)
         + _small_text(index, shapes)
+        + _missing_alt_text(index, shapes)
+        + _chart_overlaps(index, shapes)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
         + _mixed_direction(index, shapes)
@@ -4306,7 +4404,8 @@ def _title_findings(slides, slide_h, slide_w=None):
 def deck_findings(slides, slide_h, slide_w=None):
     """What differs between slides that should not: titles and body text."""
     findings = (_title_findings(slides, slide_h, slide_w) + _body_sizes(slides, slide_w, slide_h)
-                + _titles_off_their_layout(slides))
+                + _titles_off_their_layout(slides) + _missing_titles(slides, slide_h)
+                + _duplicate_titles(slides, slide_h))
     hidden = {slide["slide_index"] for slide in slides if slide.get("hidden")}
     for finding in findings:
         odd = sorted(hidden & set(finding.get("slides") or [finding.get("slide_index")]))
@@ -4314,6 +4413,77 @@ def deck_findings(slides, slide_h, slide_w=None):
             finding["hidden_slides"] = odd
             finding["message"] += (f" {_slides(odd).capitalize()} "
                                    f"{'is' if len(odd) == 1 else 'are'} hidden in the slide show.")
+    return findings
+
+
+def _slide_heading(slide, slide_h):
+    """The text that heads a slide, wherever it is: its title placeholder,
+    the title ``find_title`` finds, or a cover's big words lower down."""
+    for shape in slide["shapes"]:
+        if (shape.get("placeholder_type") in _TITLE_PLACEHOLDERS
+                and (shape.get("text") or {}).get("chars")):
+            return shape
+    title = find_title(slide, slide_h)
+    if title is not None:
+        return title
+    big = [s for s in slide["shapes"] if s.get("visible", True)
+           and (s.get("text") or {}).get("chars") and (_largest_size(s) or 0) >= _MIN_TITLE_SIZE]
+    return max(big, key=_largest_size, default=None)
+
+
+def _missing_titles(slides, slide_h):
+    """Slides with nothing to head them.
+
+    A screen reader, the outline and the list of slides PowerPoint shows
+    when presenting all go by a slide's title; a slide without one is a
+    number. Only slides whose text was read are judged.
+    """
+    findings = []
+    for slide in slides:
+        if not slide["shapes"] or any(s.get("unread") for s in slide["shapes"]):
+            continue
+        if _slide_heading(slide, slide_h) is not None:
+            continue
+        index = slide["slide_index"]
+        empty = next((s["name"] for s in slide["shapes"]
+                      if s.get("placeholder_type") in _TITLE_PLACEHOLDERS), None)
+        if empty:
+            fix = (f"Type the slide's title in '{empty}' (ppt_set_text slide_index={index} "
+                   f"shape_name_or_index='{empty}').")
+        else:
+            fix = ("Add a title that says what the slide shows, placed and set like the "
+                   "deck's other titles (ppt_add_textbox).")
+        findings.append(_finding(
+            index, "missing_title", [empty] if empty else [],
+            f"Slide {index} has no title, so a screen reader, the outline and the list "
+            "of slides show it only by its number.",
+            fix, severity="warning",
+        ))
+    return findings
+
+
+def _duplicate_titles(slides, slide_h):
+    """Slides with the same title, which read as one slide in any list of them."""
+    by_words = {}
+    for slide in slides:
+        title = _slide_heading(slide, slide_h)
+        words = " ".join(((title or {}).get("text") or {}).get("content", "").split())
+        if words:
+            by_words.setdefault(words.casefold(), []).append((slide["slide_index"], title, words))
+    findings = []
+    for same in by_words.values():
+        if len(same) < 2:
+            continue
+        numbers = [index for index, _, _ in same]
+        words = same[0][2]
+        findings.append(_finding(
+            None, "duplicate_titles", [title["name"] for _, title, _ in same],
+            f"{_slides(numbers).capitalize()} have the same title, '{words}', so they "
+            "read as one slide in the outline and to a screen reader.",
+            f"Make each say what its slide adds, such as '{words}: costs' and "
+            f"'{words}: sales' (ppt_set_text).",
+            severity="warning", slides=numbers,
+        ))
     return findings
 
 
@@ -5315,6 +5485,8 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             design = None
         refs = [slide.Shapes(z) for z in range(1, slide.Shapes.Count + 1)]
         shapes = read_shapes(refs, _geometry_facts, _read_appearance, detail)
+        if detail is None:
+            _with_chart_parts(shapes, refs)
         touched = None if detail is None else [s for s in shapes if s["name"] in detail]
         try:
             follows = slide.FollowMasterBackground == msoTrue
@@ -5347,6 +5519,56 @@ def _slide_facts_impl(slide_indices, navigate, detail, template_cache=None):
             "inner": _inner_facts(shapes, refs) if detail is None else [],
         })
     return facts
+
+
+# The most data labels of one chart that are read; a chart with more is not
+# one whose labels can be read anyway, and each costs a call.
+_MOST_LABELS = 120
+
+
+def _with_chart_parts(shapes, refs):
+    """Give each chart where its title, legend, plot and data labels are,
+    in points within the chart. See ``_chart_overlaps``."""
+    charts = {s["name"] for s in shapes if s.get("type") == msoChart}
+    if not charts:
+        return
+    for ref in refs:
+        try:
+            if ref.Name not in charts or not ref.HasChart:
+                continue
+            parts = _chart_parts(ref.Chart)
+        except Exception:
+            logger.debug("Cannot read the parts of a chart", exc_info=True)
+            continue
+        for shape in shapes:
+            if shape["name"] == ref.Name:
+                shape["chart_parts"] = parts
+
+
+def _chart_parts(chart):
+    def box(part, inside=False):
+        if inside:
+            return _box(part.InsideLeft, part.InsideTop, part.InsideWidth, part.InsideHeight)
+        return _box(part.Left, part.Top, part.Width, part.Height)
+
+    parts = {"plot": box(chart.PlotArea, inside=True), "labels": []}
+    if chart.HasTitle:
+        parts["title"] = box(chart.ChartTitle)
+    if chart.HasLegend:
+        parts["legend"] = box(chart.Legend)
+    collection = chart.SeriesCollection()
+    for i in range(1, collection.Count + 1):
+        points = collection.Item(i).Points()
+        for j in range(1, points.Count + 1):
+            if len(parts["labels"]) >= _MOST_LABELS:
+                return parts
+            point = points.Item(j)
+            if not point.HasDataLabel:
+                continue
+            label = point.DataLabel
+            if label.Width > 0 and label.Height > 0 and label.Text:
+                parts["labels"].append(box(label))
+    return parts
 
 
 def _animations(slide):
@@ -5568,6 +5790,17 @@ def _has_pictures(slides, names=None):
                for slide in slides for s in slide["shapes"])
 
 
+def _needs_package(slides):
+    """Whether the saved file has anything to add: pictures, charts and
+    SmartArt, and text PowerPoint shrinks to fit. PowerPoint for Mac cannot
+    say which text shrinks, and its file is read in place rather than saved
+    aside, so there any text is reason enough."""
+    return any(s.get("type") in (*_PICTURES, msoChart, msoSmartArt)
+               or (s.get("text") or {}).get("autofit") == "shrink_to_fit"
+               or (IS_MACOS and (s.get("text") or {}).get("chars"))
+               for slide in slides for s in slide["shapes"])
+
+
 def _has_charts(slides):
     return any(s.get("type") == msoChart for slide in slides for s in slide["shapes"])
 
@@ -5580,7 +5813,13 @@ def _with_package(slides, facts):
         aspects = (facts.get("pictures") or {}).get(index) or {}
         pixels = (facts.get("pixels") or {}).get(index) or {}
         charts = (facts.get("charts") or {}).get(index) or {}
+        described = (facts.get("described") or {}).get(index) or {}
+        scales = (facts.get("text_scale") or {}).get(index) or {}
         for shape in slide["shapes"]:
+            if shape["name"] in described:
+                shape["described"] = described[shape["name"]]
+            if shape["name"] in scales and shape.get("text"):
+                shape["shrunk"] = scales[shape["name"]]
             if shape.get("type") in _PICTURES and shape["name"] in pixels:
                 shape["pixels"] = pixels[shape["name"]]
             if shape.get("type") in _PICTURES and shape["name"] in aspects:
@@ -5621,7 +5860,7 @@ def check_layout(params: CheckLayoutInput) -> str:
         if facts is None:  # a deck with no slides
             return json.dumps({"issues": [], "total": 0, "slides_checked": 0})
         slide_w, slide_h = facts["slide_width"], facts["slide_height"]
-        if _has_pictures(slides) or _has_charts(slides):
+        if _needs_package(slides):
             _with_package(slides, _read_package(indices, charts=_has_charts(slides)))
         _with_fonts(slides, _read_fonts)
         _with_photos(slides)
@@ -5855,6 +6094,16 @@ def register_tools(mcp):
         - empty_placeholder: a placeholder left without text
         - sample_text: text a template or a draft left to be replaced, such
           as lorem ipsum, "Your title here", "[Company name]" or "XX%"
+        - small_text: text under 10 pt, at the size it is drawn
+        - blurry_picture: a picture drawn larger than its image's pixels
+        - chart_overlap: data labels on each other, or a legend or title on
+          the plot (Windows only)
+        - missing_alt_text: a picture, chart or SmartArt with no alt text
+        - missing_title, duplicate_titles (whole deck only): a slide with no
+          title, or slides with the same one
+        A slide is judged as the slide show draws it: lines shown one at a
+        time in one place, shapes a motion path moves, a sound's icon off the
+        slide and shapes parked for a Morph are not reported.
         - inconsistent_titles (whole deck only): titles that differ in size,
           position, alignment, weight, typeface or colour from slide to slide;
           a right-set title is placed by its right edge, and the title each
@@ -5878,7 +6127,7 @@ def register_tools(mcp):
 
 # On macOS the slide is read over Apple Events. Only _slide_facts_impl is
 # swapped; the checks, and what decides how much of a slide to read, are shared.
-from backend import IS_MACOS, use_mac_impls  # noqa: E402
+from backend import use_mac_impls  # noqa: E402
 
 if IS_MACOS:  # pragma: no cover - platform specific
     from ppt_mac import layout_check as _mac_layout_check

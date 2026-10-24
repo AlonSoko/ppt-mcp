@@ -1221,3 +1221,14 @@ class TestStagingThroughPowerPointsContainer:
         monkeypatch.setattr(mac_ae, "EXPORT_STAGING_DIR", str(tmp_path / "Documents"))
         assert mac_ae.staging_dir() == str(tmp_path / "Documents")
         assert list((tmp_path / "Documents").iterdir()) == []
+
+
+@macos_only
+class TestAltTextOnTheMac:
+    def test_it_is_refused_before_anything_is_written(self):
+        # PowerPoint for Mac's scripting dictionary has no alt text property.
+        from ppt_mac.shapes import _update_shape_impl
+
+        with pytest.raises(ValueError, match="View Alt Text"):
+            _update_shape_impl(1, "Photo", None, 10, None, None, None, None, None, None,
+                               alt_text="Our team")

@@ -1344,7 +1344,15 @@ def _update_many_impl(slide_index, shape_names, all_shapes, exclude,
 
 def _update_shape_impl(slide_index, shape_name, shape_index, left, top, width, height,
                        rotation, name, adjustments,
-                       dleft=None, dtop=None, dwidth=None, dheight=None):
+                       dleft=None, dtop=None, dwidth=None, dheight=None, alt_text=None):
+    if alt_text is not None:
+        # Refused before anything is written, so the rest of the call is not
+        # half applied.
+        raise ValueError(
+            "PowerPoint for Mac does not let a script set alt text: its scripting "
+            "dictionary has no such property. Set it in PowerPoint (right-click the "
+            "shape, View Alt Text), or on Windows with this tool."
+        )
     app = ppt._get_app_impl()
     goto_slide(app, slide_index)
     pres = ppt._get_pres_impl()

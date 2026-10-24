@@ -7,6 +7,7 @@ them needs nothing past the standard library.
 """
 
 import posixpath
+import re
 import struct
 import unicodedata
 import zipfile
@@ -20,6 +21,15 @@ _NS = {
 }
 _EMBED = "{%s}embed" % _NS["r"]
 _ID = "{%s}id" % _NS["r"]
+
+# PowerPoint's own mark for a picture that only decorates, which a screen
+# reader skips and so needs no alt text.
+_DECORATIVE = "{http://schemas.microsoft.com/office/drawing/2017/decorative}decorative"
+# Alt text that is only the image's file name or path, as some programs write
+# it ("Screenshot 2026-10-24 at 10.00.png").
+_FILE_NAME = re.compile(r"\.(?:png|jpe?g|gif|bmp|svg|tiff?|emf|wmf|webp|heic)$", re.IGNORECASE)
+# What a graphic frame holds, for the frames that want alt text.
+_DESCRIBED_FRAMES = ("/chart", "/diagram")
 
 
 def image_size(data: bytes):
@@ -178,16 +188,21 @@ def package_facts(path, slide_indices):
     """What the saved file says that PowerPoint will not.
 
     ``{"pictures": {slide: {name: aspect}}, "pixels": {slide: {name: (w, h)}},
-    "charts": {slide: {name: data}}}``. A picture's aspect is its image's
-    width over its height, as cropped, and its pixels are those of the part
-    shown; a chart's data is what ``gvml.charts.read_chart`` reads. A picture whose
+    "charts": {slide: {name: data}}, "described": {slide: {name: bool}},
+    "text_scale": {slide: {name: scale}}}``. A picture's aspect is its
+    image's width over its height, as cropped, and its pixels are those of
+    the part shown; a chart's data is what ``gvml.charts.read_chart`` reads.
+    ``described`` says whether each picture, chart and SmartArt has alt text,
+    and ``text_scale`` is, for each shape set to shrink its text to fit, how
+    far PowerPoint shrank it and the smallest size its runs are set in. A picture whose
     image cannot be measured, one filled as a tile, and names used twice on
     a slide are left out, so an absent entry always means unknown.
     """
-    pictures, pixels, charts = {}, {}, {}
+    pictures, pixels, charts, described, scales = {}, {}, {}, {}, {}
     with zipfile.ZipFile(path) as archive:
         for index, slide, parts in _slides(archive, slide_indices):
             aspects, sizes, data, seen, measured = {}, {}, {}, set(), set()
+            alt, scale, named, scaled = {}, {}, set(), set()
             for element in slide.iter():
                 if element.tag == "{%s}pic" % _NS["p"]:
                     props = element.find("p:nvPicPr/p:cNvPr", _NS)
@@ -195,12 +210,41 @@ def package_facts(path, slide_indices):
                         size = _picture_pixels(archive, element, parts)
                         _unique(sizes, props.get("name"), size, measured)
                         _unique(aspects, props.get("name"), size and size[0] / size[1], seen)
+                        _unique(alt, props.get("name"), _described(props), named)
                 elif element.tag == "{%s}graphicFrame" % _NS["p"]:
                     props = element.find("p:nvGraphicFramePr/p:cNvPr", _NS)
                     if props is not None:
                         _unique(data, props.get("name"), _chart(archive, element, parts), seen)
+                        holds = element.find("a:graphic/a:graphicData", _NS)
+                        uri = holds.get("uri", "") if holds is not None else ""
+                        if uri.endswith(_DESCRIBED_FRAMES):
+                            _unique(alt, props.get("name"), _described(props), named)
+                elif element.tag == "{%s}sp" % _NS["p"]:
+                    props = element.find("p:nvSpPr/p:cNvPr", _NS)
+                    fit = element.find("p:txBody/a:bodyPr/a:normAutofit", _NS)
+                    if props is not None and fit is not None:
+                        _unique(scale, props.get("name"), _shrunk(element, fit), scaled)
             pictures[index], pixels[index], charts[index] = aspects, sizes, data
-    return {"pictures": pictures, "pixels": pixels, "charts": charts}
+            described[index], scales[index] = alt, scale
+    return {"pictures": pictures, "pixels": pixels, "charts": charts,
+            "described": described, "text_scale": scales}
+
+
+def _shrunk(shape, fit):
+    """How far PowerPoint shrank a shape's text to fit, and the smallest size
+    its runs are set in (None when they take it from the layout)."""
+    sizes = [int(run.get("sz")) / 100 for run in shape.iterfind("p:txBody//a:r/a:rPr", _NS)
+             if run.get("sz")]
+    return {"scale": int(fit.get("fontScale", "100000")) / 100000,
+            "smallest": min(sizes) if sizes else None}
+
+
+def _described(props) -> bool:
+    """Whether a shape has alt text, or is marked as decoration that needs none."""
+    words = (props.get("descr") or "").strip()
+    if words and not _FILE_NAME.search(words):
+        return True
+    return any(mark.get("val") in ("1", "true") for mark in props.iter(_DECORATIVE))
 
 
 def picture_aspects(path, slide_indices):

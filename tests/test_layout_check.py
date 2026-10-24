@@ -1331,7 +1331,11 @@ class TestGradientsAndThemesChangedByHand:
                      "handthemedeck_fixed_win", "handthemedeck_fixed_mac"):
             fixed = recorded(name)
             assert all(found == [] for found in findings_by_slide(fixed).values()), name
-            assert deck_findings(fixed["slides"], fixed["slide_height"], fixed["slide_width"]) == []
+            # The gradient slide is a card and its labels, with no title: true,
+            # and not what these decks test.
+            assert [f for f in deck_findings(fixed["slides"], fixed["slide_height"],
+                                             fixed["slide_width"])
+                    if f["type"] != "missing_title"] == []
 
 
 @pytest.mark.usefixtures("without_title_edge")
@@ -4081,3 +4085,150 @@ class TestTheMorphTransition:
         # Read live from slides set to Morph by object, word and character.
         slide = SimpleNamespace(SlideShowTransition=SimpleNamespace(EntryEffect=effect))
         assert layout_check._morph(slide) is morph
+
+
+# ---------------------------------------------------------------------------
+# Alt text, shrunk text, titles and charts
+# ---------------------------------------------------------------------------
+def described_pic(name, descr=None, decorative=False):
+    words = f' descr="{descr}"' if descr is not None else ""
+    mark = ('<a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}">'
+            '<adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative"'
+            ' val="1"/></a:ext></a:extLst>') if decorative else ""
+    return (f'<p:pic><p:nvPicPr><p:cNvPr id="4" name="{name}"{words}>{mark}</p:cNvPr></p:nvPicPr>'
+            '<p:blipFill><a:blip r:embed="rId1"/><a:stretch/></p:blipFill></p:pic>')
+
+
+class TestAltTextFromTheFile:
+    def facts(self, tmp_path, *pics):
+        from utils.package import package_facts
+        path = deck_file(tmp_path, list(pics), {"rId1": ("a.png", png(160, 90))})
+        return package_facts(path, [1])["described"][1]
+
+    def test_a_picture_with_alt_text_is_described(self, tmp_path):
+        assert self.facts(tmp_path, described_pic("Photo", "Our team at the plant")) == {"Photo": True}
+
+    def test_none_or_only_a_file_name_is_not(self, tmp_path):
+        found = self.facts(tmp_path, described_pic("A"), described_pic("B", "small.png"),
+                           described_pic("C", "Screenshot 2026-10-24 at 10.00.png"))
+        assert found == {"A": False, "B": False, "C": False}
+
+    def test_a_picture_marked_as_decoration_needs_none(self, tmp_path):
+        assert self.facts(tmp_path, described_pic("Swirl", decorative=True)) == {"Swirl": True}
+
+    def test_the_text_powerpoint_shrank_says_by_how_much(self, tmp_path):
+        from utils.package import package_facts
+        body = ('<p:sp><p:nvSpPr><p:cNvPr id="5" name="Body"/></p:nvSpPr><p:txBody>'
+                '<a:bodyPr><a:normAutofit fontScale="62500"/></a:bodyPr><a:p>'
+                '<a:r><a:rPr sz="1800"/><a:t>Big</a:t></a:r>'
+                '<a:r><a:rPr sz="1400"/><a:t>small</a:t></a:r></a:p></p:txBody></p:sp>')
+        path = deck_file(tmp_path, [body], {})
+        assert package_facts(path, [1])["text_scale"][1] == {
+            "Body": {"scale": 0.625, "smallest": 14.0}}
+
+
+class TestMissingAltText:
+    def test_a_picture_without_it_is_reported_with_the_call_that_sets_it(self, monkeypatch):
+        monkeypatch.setattr(layout_check, "IS_MACOS", False)
+        [finding] = check(shape("Photo", 100, 100, 200, 150, type=msoPicture, described=False))
+        assert finding["type"] == "missing_alt_text"
+        assert "ppt_update_shape shape_name='Photo' alt_text=" in finding["fix"]
+
+    def test_on_the_mac_it_says_where_to_set_it_by_hand(self, monkeypatch):
+        monkeypatch.setattr(layout_check, "IS_MACOS", True)
+        [finding] = check(shape("Photo", 100, 100, 200, 150, type=msoPicture, described=False))
+        assert "View Alt Text" in finding["fix"]
+
+    def test_one_the_file_says_nothing_about_is_left_alone(self):
+        assert check(shape("Photo", 100, 100, 200, 150, type=msoPicture)) == []
+
+    def test_it_waits_for_the_check_of_the_slide(self):
+        found = slide_findings(
+            slide(shape("Photo", 100, 100, 200, 150, type=msoPicture, described=False)),
+            W, H, only={"Photo"})
+        assert found == []
+
+
+class TestShrunkText:
+    def test_text_shrunk_below_ten_points_is_reported_at_its_drawn_size(self):
+        box = sized("note", 14, autofit="shrink_to_fit") | {
+            "shrunk": {"scale": 0.625, "smallest": 14.0}}
+        [finding] = check(box)
+        assert "set in 14 pt and shrunk by PowerPoint to 8.8 pt" in finding["message"]
+        assert "bigger box" in finding["fix"] and "font_size" not in finding["fix"]
+
+    def test_text_shrunk_but_still_readable_is_fine(self):
+        assert check(sized("note", 18) | {"shrunk": {"scale": 0.7, "smallest": 18.0}}) == []
+
+    def test_the_size_read_live_is_already_shrunk(self):
+        # Live, on the Mac: 18 pt shrunk to 45% read as 8 pt, with no autofit
+        # to say so.
+        box = sized("note", 8.0) | {"shrunk": {"scale": 0.45, "smallest": None}}
+        [finding] = check(box)
+        assert "set in 17.8 pt and shrunk by PowerPoint to 8 pt" in finding["message"]
+        assert "font_size" not in finding["fix"]
+
+    def test_and_is_not_shrunk_again(self):
+        # Live, on Windows: 18 pt shrunk to 70% read as 13 pt, which is drawn
+        # at about 12.6 and reads well; it was reported as 9.1 pt once.
+        assert check(sized("note", 13.0) | {"shrunk": {"scale": 0.7, "smallest": None}}) == []
+
+
+def heading(index, words, size=36.0, top=30.0, layout="Blank"):
+    runs = [{"color_hex": "#222222", "size": size, "bold": True}]
+    title = textbox(f"Title {index}", 40, top, 880, 60, runs=runs)
+    title["text"]["content"] = words
+    return slide(title, index=index, layout=layout)
+
+
+class TestTitlesForEveryone:
+    def test_a_slide_with_no_title_is_reported(self):
+        body = sized("note", 20)
+        found = deck_findings([heading(1, "Plan"), slide(body, index=2)], H)
+        [finding] = [f for f in found if f["type"] == "missing_title"]
+        assert finding["slide_index"] == 2 and finding["severity"] == "warning"
+
+    def test_an_empty_title_placeholder_is_named_in_the_fix(self):
+        empty = shape("Title 1", 40, 30, 880, 60, type=msoPlaceholder,
+                      placeholder_type=layout_check.ppPlaceholderTitle, words=None)
+        [finding] = [f for f in deck_findings([slide(empty, index=3)], H)
+                     if f["type"] == "missing_title"]
+        assert "ppt_set_text slide_index=3 shape_name_or_index='Title 1'" in finding["fix"]
+
+    def test_a_cover_with_big_words_lower_down_has_a_title(self):
+        assert [f for f in deck_findings([heading(1, "Annual review", size=54, top=220)], H)
+                if f["type"] == "missing_title"] == []
+
+    def test_a_slide_whose_text_was_not_read_is_not_judged(self):
+        unread = shape("Box", 100, 100, 200, 100, unread=True)
+        assert [f for f in deck_findings([slide(unread)], H) if f["type"] == "missing_title"] == []
+
+    def test_two_slides_with_one_title_are_reported_once(self):
+        slides = [heading(2, "Results"), heading(3, "Plan"), heading(4, "results ")]
+        [finding] = [f for f in deck_findings(slides, H) if f["type"] == "duplicate_titles"]
+        assert finding["slides"] == [2, 4]
+        assert "'Results'" in finding["message"]
+
+
+class TestChartOverlaps:
+    def chart(self, **parts):
+        return shape("Chart 1", 100, 100, 600, 400, type=layout_check.msoChart,
+                     chart_parts={"plot": (60, 40, 540, 340), "labels": [], **parts})
+
+    def test_data_labels_on_each_other_are_reported(self):
+        labels = [(100, 100, 140, 115), (120, 105, 160, 120), (300, 300, 340, 315)]
+        [finding] = check(self.chart(labels=labels))
+        assert finding["type"] == "chart_overlap"
+        assert "2 of its 3 data labels" in finding["message"]
+        assert "show_data_labels=false" in finding["fix"]
+
+    def test_a_legend_on_the_plot_is_reported(self):
+        [finding] = check(self.chart(legend=(400, 60, 520, 120)))
+        assert "legend lies on the plot" in finding["message"]
+        assert "legend_position='bottom'" in finding["fix"]
+
+    def test_a_legend_beside_the_plot_is_fine(self):
+        assert check(self.chart(legend=(545, 60, 590, 120), title=(200, 5, 400, 35))) == []
+
+    def test_a_chart_whose_parts_are_unknown_is_not_judged(self):
+        assert check(shape("Chart 1", 100, 100, 600, 400, type=layout_check.msoChart)) == []
