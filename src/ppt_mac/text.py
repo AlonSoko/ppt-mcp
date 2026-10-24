@@ -75,7 +75,8 @@ logger = logging.getLogger(__name__)
 # sdef carries it twice under two spellings, `ppAutoSizeTextToFitShape` and
 # `text to fit shape`, and both share the code 0x00e50002, so this is a gap in
 # the generator rather than a gap in PowerPoint. Patched here so shrink to fit
-# keeps working, and it should disappear the next time the table is
+# can be read and turned off; PowerPoint will not let a script turn it on (see
+# _set_textframe_impl). It should disappear the next time the table is
 # regenerated.
 _AUTO_SIZE = dict(PpAutoSize)
 _AUTO_SIZE.setdefault(ppAutoSizeTextToFitShape, k.ppAutoSizeTextToFitShape)
@@ -1566,6 +1567,23 @@ def _set_textframe_impl(slide_index, shape_name_or_index,
             raise ValueError(
                 f"Invalid auto_size '{auto_size}'. "
                 f"Valid values: {list(AUTO_SIZE_MAP.keys())}"
+            )
+        if auto_size_val == ppAutoSizeTextToFitShape:
+            # Refused before the first write, like a misspelled name. Both
+            # spellings the dictionary gives, `text to fit shape` and
+            # `ppAutoSizeTextToFitShape`, answer -1708 through appscript and
+            # "Can't set auto size" through AppleScript, on a text box and a
+            # placeholder alike; 'none' and 'shape_to_fit' set fine.
+            return _refusal(
+                "ppt_set_textframe",
+                "PowerPoint for Mac does not let a script turn on shrink text on "
+                "overflow: it refuses the setting however it is named.",
+                error="ppt_set_textframe cannot take auto_size='shrink_to_fit' on macOS",
+                alternatives=[
+                    "ppt_set_textframe auto_size='shape_to_fit', so the box grows to its text",
+                    ("ppt_update_shape to make the box larger, or ppt_format_text to make "
+                     "the text smaller"),
+                ],
             )
     anchor_val = None
     if vertical_anchor is not None:

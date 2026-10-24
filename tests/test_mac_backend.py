@@ -1228,3 +1228,21 @@ class TestDuplicatingASlide:
             'tell application "Microsoft PowerPoint" to paste object presentation 2',
         ]
         assert events == ["take", "claim", "restore"]
+
+
+@macos_only
+class TestShrinkToFitOnTheMac:
+    def test_it_is_refused_by_name_before_anything_is_written(self, monkeypatch):
+        # Live, PowerPoint 16.114: both names for it answer -1708, and
+        # AppleScript "Can't set auto size".
+        from backend.mac_ae import ppt
+        from ppt_mac.text import _set_textframe_impl
+
+        def untouched(*args, **kwargs):
+            raise AssertionError("PowerPoint was reached")
+
+        monkeypatch.setattr(ppt, "_get_app_impl", untouched)
+        result = _set_textframe_impl(1, "Body", "shrink_to_fit", None, 5, None, None, None,
+                                     None, None)
+        assert result["error"] == "ppt_set_textframe cannot take auto_size='shrink_to_fit' on macOS"
+        assert any("shape_to_fit" in a for a in result["alternatives"])

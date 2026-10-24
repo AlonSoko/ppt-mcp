@@ -527,7 +527,7 @@ checked against the code by a test, so it cannot quietly go stale.
 | No table style, only the text direction | `ppt_set_table_style` |
 | No ExecuteMso and no StartNewUndoEntry | `ppt_execute_mso`, `ppt_start_undo_entry` |
 
-A further **18 tools work and refuse one argument**, with `error` naming
+A further **19 tools work and refuse one argument**, with `error` naming
 the argument rather than the tool, so dropping it and calling again works.
 `ppt_add_hyperlink` cannot take a `screen_tip`, `ppt_add_table_row` and
 `ppt_add_table_column` cannot insert at a `position`, `ppt_add_animation`
@@ -537,7 +537,9 @@ numeric arguments, `ppt_add_video` and `ppt_add_audio` cannot take
 fade, `ppt_format_chart` cannot take `chart_style`, `legend_font_size`, the
 legend and title coordinates or an 8-direction `legend_position` (they are
 computed from the chart's rendered size, which the XML does not carry),
-`ppt_format_chart_axis` cannot take `tick_label_font_size`. `ppt_set_glow`, `ppt_set_shadow` and `ppt_set_reflection` take a `target`, and whether `target='text'` works depends on whether the font carries that effect in the dictionary; where it does not, the tool refuses the argument by name rather than quietly setting the shape effect instead. The rest are
+`ppt_format_chart_axis` cannot take `tick_label_font_size`, `ppt_set_textframe`
+cannot take `auto_size='shrink_to_fit'` (PowerPoint for Mac refuses to set it
+from a script, under either of its names). `ppt_set_glow`, `ppt_set_shadow` and `ppt_set_reflection` take a `target`, and whether `target='text'` works depends on whether the font carries that effect in the dictionary; where it does not, the tool refuses the argument by name rather than quietly setting the shape effect instead. The rest are
 checks that report a write which did not land rather than a capability that
 is missing.
 
