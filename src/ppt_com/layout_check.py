@@ -2140,16 +2140,20 @@ def _misaligned(slide_index, layout, only=None):
         members = [s for s in arranged if depth[s["name"]] == level]
         found = []
         for axis in ("x", "y"):
-            found += _slips_along(axis, members, placed, seen, _card_agreement(members, axis, layout))
+            found += _slips_along(axis, members, placed, seen, _card_agreement(members, axis, layout),
+                                  _spaced(members, placed, axis))
         for slip in found:
-            mover = slip["mover"]
+            # What is moved is the fix's shape, which is not always the one
+            # that slipped (see _landing).
+            fix = slip.get("fix", slip)
+            mover = fix["mover"]
             slip["carried"] = [
                 s for s in arranged
                 if depth[s["name"]] > level and paints_box(mover)
                 and _belongs_to(s, mover, boxes)
             ]
             for shape in slip["carried"]:
-                placed[shape["name"]] = _moved(placed[shape["name"]], slip["axis"], -slip["delta"])
+                placed[shape["name"]] = _moved(placed[shape["name"]], fix["axis"], -fix["delta"])
         slips += found
 
     findings = []
@@ -2230,51 +2234,141 @@ def _card_agreement(members, axis, layout):
     }
 
 
-def _slips_along(axis, members, boxes, seen, agreement=None):
+def _pair_line(a, b, a_box, b_box, axis, seen):
+    """How two shapes stand along one axis: ``"aligned"`` when they share a
+    line, the edge of their nearest lines when those are a near miss, or None.
+    """
+    if not _related(a_box, b_box, axis):
+        return None
+    a_edges, b_edges = _edges(a_box, axis), _edges(b_box, axis)
+    gaps = {
+        edge: abs(a_edges[edge] - b_edges[edge]) for edge in a_edges
+        if all(seen[s["name"]] is None or edge in seen[s["name"]] for s in (a, b))
+    }
+    if not gaps:
+        return None
+    span = _width if axis == "x" else _height
+    allowance = None
+    if abs(span(a_box) - span(b_box)) > 2 * _ALIGNED:
+        # The middle of a line box is not where its letters look
+        # centred, and the gap between the two grows with the type: a
+        # big figure and its label are not held to a point and a half.
+        text_only = not paints_box(a) and not paints_box(b)
+        allowance = (max(_ALIGNED_CENTRE, 0.05 * (span(a_box) + span(b_box)))
+                     if text_only else _ALIGNED_CENTRE)
+    if any(_within(edge, gap, allowance) for edge, gap in gaps.items()):
+        return "aligned"
+    closest = min(gaps, key=gaps.get)
+    return closest if gaps[closest] <= _NEAR_MISS else None
+
+
+def _near_misses(shape, box, members, boxes, seen, skip=()):
+    """The shapes ``shape`` would nearly meet, standing at ``box``."""
+    found = set()
+    for axis in ("x", "y"):
+        for other in members:
+            if other is shape or other["name"] in skip:
+                continue
+            line = _pair_line(shape, other, box, boxes[other["name"]], axis, seen)
+            if line not in (None, "aligned"):
+                found.add((other["name"], axis, line))
+    return found
+
+
+def _lands_clean(shape, axis, by, members, boxes, seen, skip, clear=()):
+    """Whether moving ``shape`` this far leaves it nearly meeting nothing it
+    did not nearly meet already, and none of ``clear``."""
+    box = boxes[shape["name"]]
+    before = _near_misses(shape, box, members, boxes, seen, skip)
+    after = _near_misses(shape, _moved(box, axis, by), members, boxes, seen, skip)
+    return not after - before and not any(name in clear for name, _, _ in after)
+
+
+def _spaced(members, boxes, axis):
+    """The names of shapes in an evenly spaced row (``x``) or column (``y``)
+    of three or more like shapes, text included: the lines of a list label
+    its icons, and are spaced all the same. Moving one of them to meet a line
+    would make the gaps uneven."""
+    direction, start = ("horizontal", 0) if axis == "x" else ("vertical", 1)
+    names = set()
+    for kind, group in _like_groups(members, boxes):
+        if kind != direction or len(group) < 3:
+            continue
+        gaps = [boxes[b["name"]][start] - boxes[a["name"]][start + 2]
+                for a, b in zip(group, group[1:], strict=False)]
+        if min(gaps) > 0 and max(gaps) - min(gaps) <= _GAP_TOLERANCE:
+            names.update(s["name"] for s in group)
+    return names
+
+
+def _slips_along(axis, members, boxes, seen, agreement=None, spaced=()):
     """The slips among one level's shapes along one axis."""
     agreement = agreement or {}
     aligned = {s["name"]: agreement.get(s["name"], 0) for s in members}
     near = []
     for i, a in enumerate(members):
         for b in members[i + 1:]:
-            a_box, b_box = boxes[a["name"]], boxes[b["name"]]
-            if not _related(a_box, b_box, axis):
-                continue
-            a_edges, b_edges = _edges(a_box, axis), _edges(b_box, axis)
-            gaps = {
-                edge: abs(a_edges[edge] - b_edges[edge]) for edge in a_edges
-                if all(seen[s["name"]] is None or edge in seen[s["name"]] for s in (a, b))
-            }
-            if not gaps:
-                continue
-            span = _width if axis == "x" else _height
-            allowance = None
-            if abs(span(a_box) - span(b_box)) > 2 * _ALIGNED:
-                # The middle of a line box is not where its letters look
-                # centred, and the gap between the two grows with the type: a
-                # big figure and its label are not held to a point and a half.
-                text_only = not paints_box(a) and not paints_box(b)
-                allowance = (max(_ALIGNED_CENTRE, 0.05 * (span(a_box) + span(b_box)))
-                             if text_only else _ALIGNED_CENTRE)
-            if any(_within(edge, gap, allowance) for edge, gap in gaps.items()):
+            line = _pair_line(a, b, boxes[a["name"]], boxes[b["name"]], axis, seen)
+            if line == "aligned":
                 aligned[a["name"]] += 1
                 aligned[b["name"]] += 1
-                continue
-            closest = min(gaps, key=gaps.get)
-            if gaps[closest] <= _NEAR_MISS:
-                near.append((a, b, closest))
+            elif line is not None:
+                near.append((a, b, line))
 
     grouped = {}
     for a, b, edge in near:
-        # The one that stays is lined up with more shapes, or was there
-        # first. Stacking order is creation order unless something moved a
-        # shape in it, which is as close as a slide comes to a history.
-        if (aligned[a["name"]], -a.get("z", 0)) > (aligned[b["name"]], -b.get("z", 0)):
+        # The one that stays is in an evenly spaced row or column, or lined
+        # up with more shapes, or was there first. Stacking order is creation
+        # order unless something moved a shape in it, which is as close as a
+        # slide comes to a history.
+        if ((a["name"] in spaced, aligned[a["name"]], -a.get("z", 0))
+                > (b["name"] in spaced, aligned[b["name"]], -b.get("z", 0))):
             anchor, mover = a, b
         else:
             anchor, mover = b, a
         grouped.setdefault((mover["name"], edge), (mover, edge, []))[2].append(anchor)
-    return [_slip(axis, mover, edge, anchors, boxes) for mover, edge, anchors in grouped.values()]
+    slips = [_slip(axis, mover, edge, anchors, boxes) for mover, edge, anchors in grouped.values()]
+    return [_landing(slip, members, boxes, seen, spaced) for slip in slips]
+
+
+def _landing(slip, members, boxes, seen, spaced):
+    """The slip as a fix that does not make another one.
+
+    Moved to meet one line, a shape beside a list of rows can come to rest a
+    few points from the next, and the fix is reported again the other way.
+    When the move lands clean it stands. Otherwise the anchor is moved to the
+    mover instead, if there is only one and that lands clean, or the mover is
+    taken to the nearest other line it meets cleanly, off the first line as
+    well as near no other. When nothing lands
+    clean the first move stands, and its finding is no worse than before.
+    """
+    axis, mover, delta = slip["axis"], slip["mover"], slip["delta"]
+    skip = {a["name"] for a in slip["anchors"]}
+    if _lands_clean(mover, axis, -delta, members, boxes, seen, skip):
+        return slip
+    if len(slip["anchors"]) == 1 and slip["anchors"][0]["name"] not in spaced:
+        anchor = slip["anchors"][0]
+        if _lands_clean(anchor, axis, delta, members, boxes, seen, {mover["name"]}):
+            return dict(slip, fix=_slip(axis, anchor, slip["edge"], [mover], boxes))
+    mine = _edges(boxes[mover["name"]], axis)
+    choices = []
+    for other in members:
+        if other is mover or not _related(boxes[mover["name"]], boxes[other["name"]], axis):
+            continue
+        for edge, value in _edges(boxes[other["name"]], axis).items():
+            if seen[other["name"]] is not None and edge not in seen[other["name"]]:
+                continue
+            if seen[mover["name"]] is not None and edge not in seen[mover["name"]]:
+                continue
+            by = value - mine[edge]
+            if abs(by) <= 2 * _NEAR_MISS:
+                choices.append((abs(by), edge, other))
+    for _, edge, other in sorted(choices, key=lambda c: c[0]):
+        candidate = _slip(axis, mover, edge, [other], boxes)
+        if _lands_clean(mover, axis, -candidate["delta"], members, boxes, seen,
+                        {other["name"]}, clear=skip):
+            return dict(slip, fix=candidate)
+    return slip
 
 
 def _slip(axis, mover, edge, anchors, boxes):
@@ -2297,15 +2391,39 @@ def _misaligned_finding(slide_index, slip, placed):
     mover, axis, edge, delta = slip["mover"], slip["axis"], slip["edge"], slip["delta"]
     carried = slip.get("carried") or []
     name = mover["name"]
+    others = ", ".join(f"'{a['name']}'" for a in slip["anchors"])
+    direction = (("right of" if delta > 0 else "left of") if axis == "x"
+                 else ("below" if delta > 0 else "above"))
+    message = (f"The {edge} of '{name}' is {_pt(abs(delta))} {direction} the "
+               f"{edge} of {others}, close enough to look like a slip.")
+    fix_slip = slip.get("fix")
+    if fix_slip is not None:
+        # The plain move would leave it a few points off another line, so
+        # the fix names the move that does not.
+        names = [name] + [a["name"] for a in slip["anchors"]]
+        fixer = fix_slip["mover"]["name"]
+        for extra in [fixer] + [a["name"] for a in fix_slip["anchors"]] + [c["name"] for c in carried]:
+            if extra not in names:
+                names.append(extra)
+        field = "left" if axis == "x" else "top"
+        value = round(placed[fixer][0 if axis == "x" else 1] - fix_slip["delta"], 2)
+        lined = ", ".join(f"'{a['name']}'" for a in fix_slip["anchors"])
+        moved = (f" together with the shapes on it, {', '.join(repr(c['name']) for c in carried)}"
+                 if carried else "")
+        call = (f"ppt_update_shape shape_names={[fixer] + [c['name'] for c in carried]} "
+                f"d{field}={_num(-fix_slip['delta'])}" if carried
+                else f"ppt_update_shape {field}={value:g}")
+        fix = (f"Line up the {fix_slip['edge']} of '{fixer}' with the {fix_slip['edge']} of "
+               f"{lined}{moved} ({call}). Moving '{name}' to {others} instead would leave "
+               "it a few points off another shape.")
+        return _finding(slide_index, "misaligned", names, message, fix,
+                        severity="warning", edge=edge, off_by_pt=round(abs(delta), 2))
     field = "left" if axis == "x" else "top"
     # Where it goes is worked out from where it will be once the card it sits
     # on has been put back, which is where it was judged.
     value = round(placed[name][0 if axis == "x" else 1] - delta, 2)
-    if axis == "x":
-        direction, way = ("right of", "left") if delta > 0 else ("left of", "right")
-    else:
-        direction, way = ("below", "up") if delta > 0 else ("above", "down")
-    others = ", ".join(f"'{a['name']}'" for a in slip["anchors"])
+    way = (("left" if delta > 0 else "right") if axis == "x"
+           else ("up" if delta > 0 else "down"))
     if carried:
         names = [name] + [c["name"] for c in carried]
         listed = ", ".join(f"'{c['name']}'" for c in carried)
@@ -2318,9 +2436,7 @@ def _misaligned_finding(slide_index, slip, placed):
                f"{field}={value:g}), or ppt_align_shapes with align_to='{edge}'.")
     return _finding(
         slide_index, "misaligned", names[:1] + [a["name"] for a in slip["anchors"]] + names[1:],
-        f"The {edge} of '{name}' is {_pt(abs(delta))} {direction} the "
-        f"{edge} of {others}, close enough to look like a slip.",
-        fix, severity="warning", edge=edge, off_by_pt=round(abs(delta), 2),
+        message, fix, severity="warning", edge=edge, off_by_pt=round(abs(delta), 2),
     )
 
 

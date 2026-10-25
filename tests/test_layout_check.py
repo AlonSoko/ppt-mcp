@@ -444,6 +444,54 @@ class TestMisaligned:
         assert set(by_mover["four"]["shapes"][1:]) == {"one", "three"}
         assert "'two'" not in by_mover["four"]["message"]
 
+    # A shape beside a list of rows meets a line every few points, so the
+    # move that puts one edge on a line can leave another edge a few points
+    # off the next. Live on PowerPoint for Mac: a screenshot beside five
+    # labelled icons, moved 3.5 pt to centre it on one label, came to rest
+    # 2.7 pt off the bottom of another, and was reported again.
+    @staticmethod
+    def list_beside(*extra):
+        return (card("a", 60, 183, 250, 40, z=1),       # middle 203
+                card("b", 60, 265, 250, 40, z=2),       # bottom 305
+                card("c", 720, 94, 80, 40, z=3),        # top 94
+                *extra,
+                card("pic", 400, 100, 300, 200, z=9))   # middle 200
+
+    def test_a_move_that_lands_off_another_line_is_not_the_fix(self):
+        # 'd' is 4 pt above where 'a' would go, so neither the picture nor
+        # 'a' can simply move: the picture goes to the top of 'c'.
+        shapes = self.list_beside(card("d", 330, 176, 50, 10, z=4))
+        [finding] = [f for f in check(*shapes) if f["type"] == "misaligned"]
+        assert finding["message"].startswith("The middle of 'pic' is 3 pt above the middle of 'a'")
+        assert "Line up the top of 'pic' with the top of 'c' (ppt_update_shape top=94)" in finding["fix"]
+        moved = [card("pic", 400, 94, 300, 200, z=9) if s["name"] == "pic" else s for s in shapes]
+        assert "misaligned" not in kinds(check(*moved))
+
+    def test_the_plain_move_would_have_made_a_new_slip(self):
+        shapes = self.list_beside(card("d", 330, 176, 50, 10, z=4))
+        moved = [card("pic", 400, 103, 300, 200, z=9) if s["name"] == "pic" else s for s in shapes]
+        [finding] = [f for f in check(*moved) if f["type"] == "misaligned"]
+        assert set(finding["shapes"]) == {"pic", "b"} and finding["edge"] == "bottom"
+
+    def test_the_other_shape_moves_when_it_lands_clean(self):
+        [finding] = [f for f in check(*self.list_beside()) if f["type"] == "misaligned"]
+        assert "Line up the middle of 'a' with the middle of 'pic' (ppt_update_shape top=180)" in finding["fix"]
+        moved = [card("a", 60, 180, 250, 40, z=1) if s["name"] == "a" else s for s in self.list_beside()]
+        assert "misaligned" not in kinds(check(*moved))
+
+    def test_a_shape_in_an_evenly_spaced_column_is_not_the_one_moved(self):
+        # Live: three code boxes 28 pt apart beside a diagram added before
+        # them. Moving the last box 3 pt to meet the diagram's bottom made
+        # the gaps 28 and 31 pt, which was reported in turn.
+        diagram = card("diagram", 60, 166, 500, 195, z=1)   # bottom 361
+        codes = [card(f"code{i}", 590, 182 + i * 68, 310, 40, z=i + 2) for i in range(3)]
+        found = check(diagram, *codes)
+        [finding] = [f for f in found if f["type"] == "misaligned"]
+        assert finding["shapes"][0] == "diagram"
+        assert "top=163" in finding["fix"]
+        moved = check(card("diagram", 60, 163, 500, 195, z=1), *codes)
+        assert not {"misaligned", "uneven_spacing"} & set(kinds(moved))
+
 
 # ---------------------------------------------------------------------------
 # Spacing
