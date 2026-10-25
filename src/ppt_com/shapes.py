@@ -26,6 +26,7 @@ from ppt_com.constants import (
     msoBringToFront, msoSendToBack, msoBringForward, msoSendBackward,
     GRADIENT_STYLE_MAP,
     DASH_STYLE_NAMES,
+    ppAutoSizeNone,
 )
 
 logger = logging.getLogger(__name__)
@@ -842,6 +843,11 @@ def _add_textbox_impl(
                 f"Must be one of: {sorted(VERTICAL_ANCHOR_MAP)}"
             )
         textbox.TextFrame.VerticalAnchor = anchor_val
+        # A text box shrinks to its text, so off the top it keeps the height
+        # it was given; otherwise there is nothing to sit the text in.
+        if anchor_val != 1:
+            textbox.TextFrame.AutoSize = ppAutoSizeNone
+            textbox.Height = height
 
     placed = place_in_zorder(slide, textbox, zorder)
     return {
