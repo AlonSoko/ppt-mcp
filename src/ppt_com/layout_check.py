@@ -212,14 +212,15 @@ _UNKNOWN_BACKDROP_TYPES = frozenset({
 SHAPE_FINDINGS = frozenset({
     "off_slide", "overflow", "overlap", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "uneven_sizes", "sample_text", "number_order",
-    "text_direction", "stretched_picture", "title_edge", "font_missing",
+    "text_direction", "mixed_direction", "stretched_picture", "title_edge", "font_missing",
 })
 
 # Reported in this order, worst first.
 _ORDER = (
     "off_slide", "overflow", "overlap", "stretched_picture", "low_contrast", "cramped_text",
     "narrow_margin", "misaligned", "title_edge", "uneven_spacing", "uneven_sizes",
-    "number_order", "text_direction", "font_missing", "empty_placeholder", "sample_text",
+    "number_order", "text_direction", "mixed_direction", "font_missing", "empty_placeholder",
+    "sample_text",
     "chart_sample_data",
     "inconsistent_titles",
     "inconsistent_body_text",
@@ -3428,6 +3429,72 @@ def _text_direction(slide_index, shapes):
     return findings
 
 
+# Latin words, run together by spaces or hyphens: "F1", "PowerPoint",
+# "Claude Code". Then what follows them up to the next letter.
+_LATIN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[ \-][A-Za-z0-9]+)*")
+_AFTER_LATIN = re.compile(r"[^\sA-Za-z0-9\u0590-\u08FF\uFB1D-\uFEFF\u200f]*\s?")
+_RLM = "\u200f"
+
+
+def _mixed_direction(slide_index, shapes):
+    """Latin words in a right-to-left paragraph, with a space or a mark after.
+
+    PowerPoint for Mac splits the text into runs by script as it is written,
+    and the space or punctuation after a Latin word goes into the Latin run.
+    In a paragraph drawn right to left that run is drawn as one block, so
+    "בדור F1 ההורים" comes out with two spaces on one side of F1 and none
+    on the other, and the colon of "F1: שי טצו" is drawn before F1. A
+    right-to-left mark (U+200F) after the word, and after its punctuation,
+    puts them in the Hebrew run, where they are drawn in their place.
+    """
+    findings = []
+    for shape in shapes:
+        text = shape.get("text") or {}
+        content = text.get("content") or ""
+        if not content or not shape.get("visible", True):
+            continue
+        directions = text.get("directions") or []
+        paragraphs = _paragraphs(content)
+        hits = []
+        for index, paragraph in enumerate(paragraphs, start=1):
+            if _script(paragraph) not in _RANGE_WORDS:
+                continue
+            first = next((ch for ch in paragraph
+                          if unicodedata.bidirectional(ch) in _LEFT_TO_RIGHT | _RIGHT_TO_LEFT), "")
+            set_rtl = index <= len(directions) and directions[index - 1] == "rtl"
+            if not set_rtl and unicodedata.bidirectional(first) not in _RIGHT_TO_LEFT:
+                continue
+            for match in _LATIN_RUN.finditer(paragraph):
+                after = _AFTER_LATIN.match(paragraph, match.end()).group(0)
+                if not after:
+                    continue
+                marks = after.rstrip()
+                rest = paragraph[match.end() + len(after):]
+                if not marks and not rest:
+                    continue
+                hits.append((match.group(0), after, marks))
+        if not hits:
+            continue
+        name = shape["name"]
+        word, after, marks = hits[0]
+        find = word + after
+        fixed = word + _RLM + (marks + _RLM if marks else "") + after[len(marks):]
+        shown = fixed.replace(_RLM, "\\u200f")
+        more = "" if len(hits) == 1 else f", and {len(hits) - 1} more like it"
+        findings.append(_finding(
+            slide_index, "mixed_direction", [name],
+            f"'{name}' has Latin text in a right-to-left paragraph, \"{find.strip()}\"{more}. "
+            "PowerPoint for Mac puts the space or punctuation after it in the Latin "
+            "run and draws it on the wrong side of the word.",
+            f"Put a right-to-left mark (U+200F) after the word"
+            f"{' and after its punctuation' if marks else ''}: ppt_find_replace_text "
+            f"slide_indices=[{slide_index}] shape_name='{name}' find_text=\"{find}\" "
+            f"replace_text=\"{shown}\". The mark is invisible.",
+            severity="warning", examples=[h[0] for h in hits],
+        ))
+    return findings
+
+
 _PICTURES = frozenset({msoPicture, msoLinkedPicture})
 
 
@@ -3670,6 +3737,7 @@ def slide_findings(slide, slide_w, slide_h, only=None, trust_template=True):
         + _stretched(index, shapes, slide_w * slide_h)
         + _number_order(index, shapes)
         + _text_direction(index, shapes)
+        + _mixed_direction(index, shapes)
     )
     findings += _inside_groups(index, slide, slide_w, slide_h, trust_template)
     if only is not None:
@@ -3727,6 +3795,7 @@ def _inside_groups(index, slide, slide_w, slide_h, trust_template=True):
                 + _sample_text(index, inner)
                 + _number_order(index, inner)
                 + _text_direction(index, inner)
+                + _mixed_direction(index, inner)
                 + _fonts(index, inner, slide.get("theme_fonts")))
     unreachable = {s["name"]: s for s in inner if s.get("reachable") is False}
     for finding in findings:

@@ -1911,6 +1911,37 @@ def directed(name, top, content, directions):
     return box
 
 
+class TestMixedDirection:
+    """Live on PowerPoint for Mac: "בדור F1 ההורים" set right to left was
+    drawn with two spaces on one side of F1 and none on the other, and the
+    colon of "F1: שי טצו" before F1. The space and the colon went into the
+    Latin run; a right-to-left mark after them draws both in their place."""
+
+    def test_a_latin_word_before_a_space_is_reported_with_the_mark(self):
+        [finding] = check(directed("t", 100, "בדור F1 ההורים הם שי טצו", ["rtl"]))
+        assert finding["type"] == "mixed_direction"
+        assert 'find_text="F1 " replace_text="F1\\u200f "' in finding["fix"]
+
+    def test_punctuation_after_the_word_gets_a_mark_of_its_own(self):
+        [finding] = check(directed("t", 100, "F1: שי טצו × פודל", ["rtl"]))
+        assert 'find_text="F1: " replace_text="F1\\u200f:\\u200f "' in finding["fix"]
+
+    def test_the_find_text_does_not_reach_into_a_longer_word(self):
+        # "F1 " cannot match inside "F1b ", which find-and-replace would break.
+        [finding] = check(directed("t", 100, "בדור F1b מכליאים שוב", ["rtl"]))
+        assert 'find_text="F1b "' in finding["fix"]
+
+    def test_text_already_marked_is_not_reported(self):
+        assert check(directed("t", 100, "בדור F1\u200f ההורים", ["rtl"])) == []
+
+    def test_digits_alone_and_a_word_at_the_end_are_not_reported(self):
+        assert check(directed("t", 100, "בדור 1 ההורים", ["rtl"])) == []
+        assert check(directed("t", 100, "שלום Claude Code", ["rtl"])) == []
+
+    def test_a_left_to_right_paragraph_is_not_reported(self):
+        assert check(directed("t", 100, "Claude Code is fun", ["ltr"])) == []
+
+
 class TestTextDirection:
     """Live on Windows, "1516 עד 1917" in a paragraph not set right to left
     drew 1516 on the left; set right to left, it drew on the right. The Mac
