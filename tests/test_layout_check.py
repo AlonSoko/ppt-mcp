@@ -479,6 +479,17 @@ class TestMisaligned:
         moved = [card("a", 60, 180, 250, 40, z=1) if s["name"] == "a" else s for s in self.list_beside()]
         assert "misaligned" not in kinds(check(*moved))
 
+    def test_a_coincidence_beside_a_list_is_not_a_slip(self):
+        # Live: a photo whose top was lined up with the first item of a list
+        # beside it, its middle 3.8 pt off the middle of the second item.
+        # Moving it would take it off the line it is on, and the list cannot
+        # move without its gaps going uneven, so nothing is reported.
+        found = check(card("a", 60, 100, 250, 40, z=1),
+                      card("b", 60, 183, 250, 40, z=2),
+                      card("c", 60, 266, 250, 40, z=3),
+                      card("pic", 400, 100, 300, 200, z=4))
+        assert "misaligned" not in kinds(found)
+
     def test_a_shape_in_an_evenly_spaced_column_is_not_the_one_moved(self):
         # Live: three code boxes 28 pt apart beside a diagram added before
         # them. Moving the last box 3 pt to meet the diagram's bottom made

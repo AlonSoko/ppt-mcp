@@ -2262,26 +2262,37 @@ def _pair_line(a, b, a_box, b_box, axis, seen):
     return closest if gaps[closest] <= _NEAR_MISS else None
 
 
-def _near_misses(shape, box, members, boxes, seen, skip=()):
-    """The shapes ``shape`` would nearly meet, standing at ``box``."""
-    found = set()
+def _lines_met(shape, box, members, boxes, seen, skip=()):
+    """What ``shape`` would line up with, and what it would nearly meet,
+    standing at ``box``: two sets of (name, axis, line)."""
+    aligned, near = set(), set()
     for axis in ("x", "y"):
         for other in members:
             if other is shape or other["name"] in skip:
                 continue
             line = _pair_line(shape, other, box, boxes[other["name"]], axis, seen)
-            if line not in (None, "aligned"):
-                found.add((other["name"], axis, line))
-    return found
+            if line == "aligned":
+                aligned.add((other["name"], axis))
+            elif line is not None:
+                near.add((other["name"], axis, line))
+    return aligned, near
+
+
+def _move_costs(shape, axis, by, members, boxes, seen, skip, clear=()):
+    """What moving ``shape`` this far would cost: the near misses it would
+    make (counting any left with ``clear``), and the alignments it would lose."""
+    box = boxes[shape["name"]]
+    aligned, near = _lines_met(shape, box, members, boxes, seen, skip)
+    aligned_after, near_after = _lines_met(shape, _moved(box, axis, by), members, boxes, seen, skip)
+    made = (near_after - near) | {n for n in near_after if n[0] in clear}
+    return made, aligned - aligned_after
 
 
 def _lands_clean(shape, axis, by, members, boxes, seen, skip, clear=()):
-    """Whether moving ``shape`` this far leaves it nearly meeting nothing it
-    did not nearly meet already, and none of ``clear``."""
-    box = boxes[shape["name"]]
-    before = _near_misses(shape, box, members, boxes, seen, skip)
-    after = _near_misses(shape, _moved(box, axis, by), members, boxes, seen, skip)
-    return not after - before and not any(name in clear for name, _, _ in after)
+    """Whether moving ``shape`` this far makes no near miss, leaves none with
+    ``clear``, and keeps every line it is on."""
+    made, lost = _move_costs(shape, axis, by, members, boxes, seen, skip, clear)
+    return not made and not lost
 
 
 def _spaced(members, boxes, axis):
@@ -2328,7 +2339,8 @@ def _slips_along(axis, members, boxes, seen, agreement=None, spaced=()):
             anchor, mover = b, a
         grouped.setdefault((mover["name"], edge), (mover, edge, []))[2].append(anchor)
     slips = [_slip(axis, mover, edge, anchors, boxes) for mover, edge, anchors in grouped.values()]
-    return [_landing(slip, members, boxes, seen, spaced) for slip in slips]
+    landed = (_landing(slip, members, boxes, seen, spaced) for slip in slips)
+    return [slip for slip in landed if slip is not None]
 
 
 def _landing(slip, members, boxes, seen, spaced):
@@ -2339,12 +2351,19 @@ def _landing(slip, members, boxes, seen, spaced):
     When the move lands clean it stands. Otherwise the anchor is moved to the
     mover instead, if there is only one and that lands clean, or the mover is
     taken to the nearest other line it meets cleanly, off the first line as
-    well as near no other. When nothing lands
-    clean the first move stands, and its finding is no worse than before.
+    well as near no other. A clean landing also keeps every line the shape
+    is on.
+
+    When nothing lands clean and the first move would take the shape off a
+    line it is on, the near miss is a coincidence, not a slip: a photo
+    whose top is lined up with a list beside it, its middle a few points off
+    one line of the list. That is not reported. Otherwise the first move
+    stands, and its finding is no worse than before.
     """
     axis, mover, delta = slip["axis"], slip["mover"], slip["delta"]
     skip = {a["name"] for a in slip["anchors"]}
-    if _lands_clean(mover, axis, -delta, members, boxes, seen, skip):
+    made, lost = _move_costs(mover, axis, -delta, members, boxes, seen, skip)
+    if not made and not lost:
         return slip
     if len(slip["anchors"]) == 1 and slip["anchors"][0]["name"] not in spaced:
         anchor = slip["anchors"][0]
@@ -2368,7 +2387,7 @@ def _landing(slip, members, boxes, seen, spaced):
         if _lands_clean(mover, axis, -candidate["delta"], members, boxes, seen,
                         {other["name"]}, clear=skip):
             return dict(slip, fix=candidate)
-    return slip
+    return None if lost else slip
 
 
 def _slip(axis, mover, edge, anchors, boxes):
