@@ -3439,13 +3439,14 @@ _RLM = "\u200f"
 def _mixed_direction(slide_index, shapes):
     """Latin words in a right-to-left paragraph, with a space or a mark after.
 
-    PowerPoint for Mac splits the text into runs by script as it is written,
-    and the space or punctuation after a Latin word goes into the Latin run.
+    PowerPoint splits the text into runs by script as it is written, and the
+    space or punctuation after a Latin word goes into the Latin run.
     In a paragraph drawn right to left that run is drawn as one block, so
     "בדור F1 ההורים" comes out with two spaces on one side of F1 and none
     on the other, and the colon of "F1: שי טצו" is drawn before F1. A
     right-to-left mark (U+200F) after the word, and after its punctuation,
-    puts them in the Hebrew run, where they are drawn in their place.
+    puts them in the Hebrew run, where they are drawn in their place. Seen
+    the same on Windows and on the Mac.
     """
     findings = []
     for shape in shapes:
@@ -3484,8 +3485,8 @@ def _mixed_direction(slide_index, shapes):
         findings.append(_finding(
             slide_index, "mixed_direction", [name],
             f"'{name}' has Latin text in a right-to-left paragraph, \"{find.strip()}\"{more}. "
-            "PowerPoint for Mac puts the space or punctuation after it in the Latin "
-            "run and draws it on the wrong side of the word.",
+            "PowerPoint puts the space or punctuation after it in the Latin run and "
+            "draws it on the wrong side of the word.",
             f"Put a right-to-left mark (U+200F) after the word"
             f"{' and after its punctuation' if marks else ''}: ppt_find_replace_text "
             f"slide_indices=[{slide_index}] shape_name='{name}' find_text=\"{find}\" "

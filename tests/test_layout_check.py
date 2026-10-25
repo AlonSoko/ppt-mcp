@@ -1912,7 +1912,7 @@ def directed(name, top, content, directions):
 
 
 class TestMixedDirection:
-    """Live on PowerPoint for Mac: "בדור F1 ההורים" set right to left was
+    """Live on PowerPoint for Windows and for Mac: "בדור F1 ההורים" set right to left was
     drawn with two spaces on one side of F1 and none on the other, and the
     colon of "F1: שי טצו" before F1. The space and the colon went into the
     Latin run; a right-to-left mark after them draws both in their place."""
