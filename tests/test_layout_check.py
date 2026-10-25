@@ -621,6 +621,28 @@ class TestTitles:
         assert find_title(cover, H) is None
         assert deck_findings([cover, titled(2), titled(3), titled(4)], H) == []
 
+    def test_a_closing_slide_dressed_like_the_cover_is_not_compared(self):
+        # Live: a dark cover and closing slide around light content slides,
+        # the closing slide's "Welcome home" in 44 pt near the top, reported
+        # as a title out of size among the 32 pt ones.
+        def dressed(s, colour):
+            return {**s, "background_hex": colour}
+
+        cover = dressed(titled(1, size=60, top=220), "#33261F")
+        content = [dressed(titled(i), "#FBF5F0") for i in (2, 3, 4)]
+        closing = dressed(titled(5, size=44, top=130), "#33261F")
+        assert deck_findings([cover, *content, closing], H) == []
+
+    def test_a_large_title_on_a_content_slide_is_still_reported(self):
+        def dressed(s, colour):
+            return {**s, "background_hex": colour}
+
+        cover = dressed(titled(1, size=60, top=220), "#33261F")
+        content = [dressed(titled(i), "#FBF5F0") for i in (2, 3, 4)]
+        odd = dressed(titled(5, size=44), "#FBF5F0")
+        [finding] = deck_findings([cover, *content, odd], H)
+        assert finding["slides"] == [5]
+
     def test_slides_on_different_layouts_are_compared(self):
         # Live: one slide on the Title and Content layout, its 44 pt title
         # placeholder among slides with 32 pt title boxes of their own.

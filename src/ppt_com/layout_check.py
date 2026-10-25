@@ -3838,6 +3838,25 @@ def _slides(numbers):
     return ("slide " if len(numbers) == 1 else "slides ") + ", ".join(str(n) for n in numbers)
 
 
+def _bookends(slides):
+    """Slides dressed like the cover, which are not held to the content titles.
+
+    A closing slide or a section divider often wears the cover's backdrop,
+    one most slides do not have, with its words set large near the top: a
+    "Thank you" in 44 pt was reported as a title out of size among 32 pt
+    ones. Slides with the first slide's background, when that is not the
+    deck's usual one, are left out of the comparison like the cover itself.
+    """
+    backgrounds = [slide.get("background_hex") for slide in slides]
+    if len(slides) < 3 or not backgrounds[0]:
+        return set()
+    usual = max(set(backgrounds), key=backgrounds.count)
+    if backgrounds[0] == usual:
+        return set()
+    return {slide["slide_index"] for slide in slides[1:]
+            if slide.get("background_hex") == backgrounds[0]}
+
+
 def _title_findings(slides, slide_h, slide_w=None):
     """Titles that differ between slides.
 
@@ -3851,8 +3870,11 @@ def _title_findings(slides, slide_h, slide_w=None):
     light title on a dark slide is meant.
     """
     by_index = {slide["slide_index"]: slide for slide in slides}
+    bookends = _bookends(slides)
     titled = []
     for slide in slides:
+        if slide["slide_index"] in bookends:
+            continue
         title = find_title(slide, slide_h)
         if title is not None:
             titled.append((slide["slide_index"], title))
