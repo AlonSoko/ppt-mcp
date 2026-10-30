@@ -3378,6 +3378,26 @@ def _drawn_order(line, right_to_left, digits_as_letters=False):
     return "".join(line[i] for i in order)
 
 
+def _hebrew_and_arabic(line):
+    """Whether a line has both Hebrew and Arabic letters in it.
+
+    By the bidirectional algorithm such a line draws the same in either
+    direction, both scripts reading right to left. PowerPoint for Mac does not
+    draw it so: it splits the line into a Hebrew run and an Arabic run, and in
+    a paragraph set left to right the spaces and the dot between them,
+    "תודה · شكرا", land against the Arabic word on the far side.
+    """
+    hebrew = arabic = False
+    for ch in line:
+        if unicodedata.bidirectional(ch) not in _RIGHT_TO_LEFT:
+            continue
+        if "\u0590" <= ch <= "\u05ff" or "\ufb1d" <= ch <= "\ufb4f":
+            hebrew = True
+        else:
+            arabic = True
+    return hebrew and arabic
+
+
 def _text_direction(slide_index, shapes):
     """Hebrew or Arabic paragraphs left set left to right.
 
@@ -3400,7 +3420,12 @@ def _text_direction(slide_index, shapes):
         paragraphs = _paragraphs(content)
         wrong, mixed = [], []
         for index, (paragraph, direction) in enumerate(zip(paragraphs, directions), start=1):
-            if direction != "ltr" or _script(paragraph) not in _RANGE_WORDS:
+            # The Mac answers None for a paragraph not set right to left, and
+            # draws it by its first letter, which reads right but for one case:
+            # Hebrew and Arabic in one line, drawn there as on Windows.
+            if direction == "rtl" or _script(paragraph) not in _RANGE_WORDS:
+                continue
+            if direction is None and not _hebrew_and_arabic(paragraph):
                 continue
             first = next((ch for ch in paragraph
                           if unicodedata.bidirectional(ch) in _LEFT_TO_RIGHT | _RIGHT_TO_LEFT), "")
@@ -3409,7 +3434,7 @@ def _text_direction(slide_index, shapes):
             wrong.append(index)
             line = paragraph.strip()
             if any(_drawn_order(line, False, digits) != _drawn_order(line, True, digits)
-                   for digits in (False, True)):
+                   for digits in (False, True)) or _hebrew_and_arabic(line):
                 mixed.append(line)
         if not mixed:
             continue

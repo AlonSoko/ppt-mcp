@@ -1957,6 +1957,24 @@ class TestTextDirection:
         [finding] = check(directed("t", 100, "שלום, עולם.", ["ltr"]))
         assert finding["type"] == "text_direction"
 
+    def test_hebrew_and_arabic_in_one_paragraph_are_reported(self):
+        # Live on the Mac: "תודה · شكرا" set left to right was drawn with the
+        # dot against the Arabic word; set right to left it drew in order.
+        [finding] = check(directed("t", 100, "תודה  ·  شكرا", ["ltr"]))
+        assert finding["type"] == "text_direction"
+        assert "direction='rtl'" in finding["fix"]
+
+    def test_hebrew_and_arabic_not_set_on_the_mac_are_reported(self):
+        # The Mac reads a paragraph not set right to left as unknown (None).
+        [finding] = check(directed("t", 100, "תודה  ·  شكرا", [None]))
+        assert finding["type"] == "text_direction"
+
+    def test_a_hebrew_paragraph_not_set_on_the_mac_is_still_left_alone(self):
+        assert check(directed("t", 100, "1516 עד 1917.", [None])) == []
+
+    def test_hebrew_and_arabic_set_right_to_left_are_not(self):
+        assert check(directed("t", 100, "תודה  ·  شكرا", ["rtl"])) == []
+
     def test_words_alone_draw_the_same_and_are_not(self):
         assert check(directed("t", 100, "ציר הזמן", ["ltr"])) == []
 
