@@ -899,6 +899,9 @@ def _text_of(blocks):
 
 
 async def _run(tool, params, presentation):
+    if not isinstance(tool, str) or not tool:
+        raise ToolError("A step needs a 'tool': the name of the tool to run, "
+                        "such as \"ppt_add_textbox\".")
     target = mcp._registered_tool(tool)
     if target is None or tool in _CATALOG_TOOLS:
         import difflib
@@ -996,7 +999,8 @@ async def ppt_run_steps(steps: list[dict], presentation: str | None = None,
     """
     report, results, images = [], [], []
     for number, step in enumerate(steps, start=1):
-        tool = (step or {}).get("tool")
+        step = step if isinstance(step, dict) else {}
+        tool = step.get("tool")
         try:
             params = _resolve_refs(step.get("params") or {}, results)
             blocks = await _run(tool, params, step.get("presentation", presentation))

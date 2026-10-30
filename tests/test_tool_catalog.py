@@ -24,6 +24,7 @@ async def main():
     out = {}
     out["listed"] = [t.name for t in await s.mcp.list_tools()]
     out["registered"] = len(s.mcp._tool_manager.list_tools())
+    out["instructions"] = s.mcp._mcp_server.instructions or ""
 
     async def text(name, args):
         try:
@@ -63,7 +64,7 @@ def _probe(mode):
     env.pop("PPT_TOOL_MODE", None)
     if mode is not None:
         env["PPT_TOOL_MODE"] = mode
-    done = subprocess.run([sys.executable, "-c", _PROBE], cwd=ROOT, env=env,
+    done = subprocess.run([sys.executable, "-c", _PROBE], cwd=ROOT, env=env, check=False,
                           capture_output=True, text=True, timeout=180)
     assert done.returncode == 0, done.stderr[-2000:]
     return json.loads(done.stdout.strip().splitlines()[-1])
@@ -114,8 +115,15 @@ def test_references_read_earlier_results(catalog):
     assert catalog["refs"] == {"a": "TextBox 2", "b": [7], "c": "$keep"}
 
 
+def test_catalog_mode_puts_its_note_first_in_the_instructions(catalog):
+    assert catalog["instructions"].startswith("Catalog mode: call ppt_describe()")
+    # The rest of the instructions follow, unchanged.
+    assert "## Getting started" in catalog["instructions"]
+
+
 def test_full_mode_lists_every_tool_but_the_three():
     full = _probe("full")
+    assert "Catalog mode" not in full["instructions"]
     assert len(full["listed"]) == full["registered"] - 3
     assert not {"ppt_describe", "ppt_run", "ppt_run_steps"} & set(full["listed"])
 
