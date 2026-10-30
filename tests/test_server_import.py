@@ -150,3 +150,9 @@ def test_a_null_sent_for_an_optional_field_is_still_accepted(server):
 
     model = AddTextboxInput(slide_index=1, left=0, top=0, width=10, height=10, font_size=None)
     assert model.font_size is None
+def test_every_tool_has_a_description(server):
+    """A tool with no description is only a name to the model:
+    ppt_batch_apply_formatting registered without one."""
+    tools = asyncio.run(server.mcp.list_tools())
+    bare = sorted(t.name for t in tools if not (t.description or "").strip())
+    assert bare == [], f"tools without a description: {bare}"
