@@ -367,6 +367,30 @@ When a close leaves no presentation open in a PowerPoint the server started, `pp
 }
 ```
 
+### A smaller tool list for a small context window
+
+A client sends the description of every tool it lists with every request, and this server's 157 come to about 112k tokens, a large part of a 128k or 200k window before any work. Set `PPT_TOOL_MODE=catalog` in the server's `env` and it lists three tools instead, about 700 tokens:
+
+| Tool | What it does |
+|---|---|
+| `ppt_describe` | With no names, the list of all the tools, one line each. With names, their full description and arguments. |
+| `ppt_run` | Runs one tool: `{"tool": "ppt_add_textbox", "params": {...}}`. |
+| `ppt_run_steps` | Runs several in order, in one call. A step can use what an earlier one answered: `"$prev.shape_name"` is the previous step's `shape_name`, `"$2.shape_name"` the second step's. The first step that fails ends the run and says why. |
+
+The tools themselves are the same, with the same arguments, checks and answers, and `presentation` is passed the same way. What is lost is per-tool control in the client: approving or blocking a tool by its name, and its read-only hint, apply to the three tools above rather than to each one. The model asks `ppt_describe` before using a tool for the first time, which costs one call. Without the setting, every tool is listed as before.
+
+```json
+{
+  "mcpServers": {
+    "powerpoint": {
+      "command": "uvx",
+      "args": ["ppt-mcp"],
+      "env": { "PPT_TOOL_MODE": "catalog" }
+    }
+  }
+}
+```
+
 ## 🍎 macOS support
 
 **12 tools refuse on macOS. The rest work.** The 12 are listed by name in
