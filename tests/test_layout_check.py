@@ -490,6 +490,20 @@ class TestMisaligned:
                       card("pic", 400, 100, 300, 200, z=4))
         assert "misaligned" not in kinds(found)
 
+    def test_where_the_pieces_of_a_bar_meet_is_not_an_edge(self):
+        # Live: a title rule drawn as three 28 pt rectangles, black, red and
+        # gold, over a column of 52 pt icon squares. The squares end at 112,
+        # 4 pt from where red meets gold at 116: reported as a slip.
+        rule = [card(f"bar{i}", 60 + 28 * i, 92, 28, 4, z=1 + i) for i in range(3)]
+        icons = [card(f"icon{i}", 60, 120 + 86 * i, 52, 52, z=4 + i) for i in range(4)]
+        assert "misaligned" not in kinds(check(*rule, *icons))
+
+    def test_the_outer_edge_of_a_bar_still_counts(self):
+        rule = [card(f"bar{i}", 63 + 28 * i, 92, 28, 4, z=1 + i) for i in range(3)]
+        icons = [card(f"icon{i}", 60, 120 + 86 * i, 52, 52, z=4 + i) for i in range(4)]
+        [finding] = [f for f in check(*rule, *icons) if f["type"] == "misaligned"]
+        assert finding["shapes"][0] == "bar0" and finding["edge"] == "left"
+
     def test_a_shape_in_an_evenly_spaced_column_is_not_the_one_moved(self):
         # Live: three code boxes 28 pt apart beside a diagram added before
         # them. Moving the last box 3 pt to meet the diagram's bottom made

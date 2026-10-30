@@ -545,6 +545,38 @@ def _seen_edges(shape):
     return seen
 
 
+def _drop_joined_edges(arranged, boxes, seen):
+    """Leave out the edges where two painted shapes meet end to end.
+
+    Shapes butted together edge to edge, the same height and in line, read
+    as one bar: a rule in three colours drawn as three rectangles. Where they
+    meet there is no edge to see, and neither is the middle of a piece, so a
+    piece is held only to the bar's own outer edges; a column of icons that
+    happened to end 4 pt from where one colour meets the next was reported
+    as out of line with it. Likewise down a column of pieces stacked
+    top to bottom.
+    """
+    painted = [s for s in arranged if paints_box(s)]
+    for axis, (start, end), (low, high), inner in (
+        ("x", (0, 2), (1, 3), {"center"}),
+        ("y", (1, 3), (0, 2), {"middle"}),
+    ):
+        near, far = ("left", "right") if axis == "x" else ("top", "bottom")
+        for a in painted:
+            for b in painted:
+                if a is b:
+                    continue
+                ab, bb = boxes[a["name"]], boxes[b["name"]]
+                if (abs(ab[end] - bb[start]) <= _ALIGNED
+                        and abs(ab[low] - bb[low]) <= _ALIGNED
+                        and abs(ab[high] - bb[high]) <= _ALIGNED):
+                    for shape, edge in ((a, far), (b, near)):
+                        edges = seen[shape["name"]]
+                        if edges is None:
+                            edges = {"left", "center", "right", "top", "middle", "bottom"}
+                        seen[shape["name"]] = edges - {edge} - inner
+
+
 def _margins(arranged, boxes, depth, slide_w, slide_h):
     """The margins the slide's shapes keep from its edges, or None.
 
@@ -2121,6 +2153,7 @@ def _misaligned(slide_index, layout, only=None):
     """
     arranged, boxes, depth = layout["arranged"], layout["boxes"], layout["depth"]
     seen = {s["name"]: _seen_edges(s) for s in arranged}
+    _drop_joined_edges(arranged, boxes, seen)
     # A photo the full height of the slide has its middle at the slide's
     # middle, which no list beside it is lined up with; likewise across.
     slide_w, slide_h = layout.get("slide_width"), layout.get("slide_height")
