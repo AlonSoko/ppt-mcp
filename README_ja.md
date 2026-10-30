@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English version</a>
+  <a href="README.md">English version</a> · <a href="README_he.md">עברית</a>
 </p>
 
 <p align="center">
