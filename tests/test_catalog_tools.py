@@ -3,7 +3,9 @@
 They reach the other tools through the server's own call_tool, so here they
 are pointed at a stand-in server whose tools need no PowerPoint: one makes a
 "shape" and answers its name, one echoes what it was given, one fails, one
-answers plain text, one an image, and one takes no arguments. The mode itself,
+answers plain text, one an image, and one takes no arguments. A crash's text
+reaches the caller under mcp 1.x and stays on the server under 2.x; a ToolError's
+reaches it under both, and the probes check each as a direct call would answer. The mode itself,
 read when the server loads, is in test_tool_catalog.py.
 """
 
@@ -62,6 +64,11 @@ def probes(monkeypatch):
         """Always fails!"""
         raise RuntimeError("the shape is gone")
 
+    @srv.tool(name="ppt_refuse")
+    async def refuse(params: _Echo) -> str:
+        """Refuse, saying why."""
+        raise server.ToolError("slide 9 does not exist")
+
     @srv.tool(name="ppt_text")
     async def text(params: _Echo) -> str:
         """Answer plain text?"""
@@ -95,6 +102,15 @@ def steps(server, items, **kwargs):
     return json.loads(out[0]), out[1:]
 
 
+def crash_text_reaches_caller(server):
+    """Whether a direct call to a crashing tool answers the crash's text."""
+    try:
+        run(server.mcp.call_tool, "ppt_fail", {"params": {}})
+    except Exception as exc:
+        return "the shape is gone" in str(exc)
+    raise AssertionError("ppt_fail did not fail")
+
+
 def text_of(blocks):
     return "".join(getattr(b, "text", "") or "" for b in blocks)
 
@@ -106,7 +122,7 @@ class TestDescribe:
     def test_no_names_answers_the_list_one_line_a_tool(self, probes):
         lines = run(probes.ppt_describe).splitlines()
         assert lines == sorted(lines, key=lambda line: [
-            "ppt_make", "ppt_echo", "ppt_fail", "ppt_text", "ppt_picture", "ppt_bare",
+            "ppt_make", "ppt_echo", "ppt_fail", "ppt_refuse", "ppt_text", "ppt_picture", "ppt_bare",
         ].index(line.split(":")[0]))
         assert "ppt_echo: Answer what it was given." in lines
 
@@ -196,8 +212,14 @@ class TestRun:
             run(probes.ppt_run, "ppt_echo", {"slide_index": "three"})
 
     def test_a_failing_tool_fails_the_run(self, probes):
-        with pytest.raises(Exception, match="the shape is gone"):
+        with pytest.raises(Exception, match="Error executing tool ppt_fail") as raised:
             run(probes.ppt_run, "ppt_fail", {})
+        # The reason is there exactly when a direct call would give it.
+        assert ("the shape is gone" in str(raised.value)) == crash_text_reaches_caller(probes)
+
+    def test_a_refusal_keeps_its_reason(self, probes):
+        with pytest.raises(Exception, match="slide 9 does not exist"):
+            run(probes.ppt_run, "ppt_refuse", {})
 
     def test_an_image_comes_back_as_an_image(self, probes):
         blocks = run(probes.ppt_run, "ppt_picture", {"slide_index": 2})
@@ -291,7 +313,11 @@ class TestRunSteps:
         assert (report["ran"], report["of"]) == (2, 3)
         assert report["steps"][1] == {"step": 2, "tool": "ppt_fail",
                                       "error": report["steps"][1]["error"]}
-        assert "the shape is gone" in report["steps"][1]["error"]
+        assert "Error executing tool ppt_fail" in report["steps"][1]["error"]
+
+    def test_a_refusal_in_a_step_keeps_its_reason(self, probes):
+        report, _ = steps(probes, [{"tool": "ppt_refuse", "params": {}}])
+        assert "slide 9 does not exist" in report["steps"][0]["error"]
 
     def test_without_stopping_every_step_runs_and_each_failure_is_reported(self, probes):
         report, _ = steps(probes, [

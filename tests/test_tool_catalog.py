@@ -24,7 +24,7 @@ async def main():
     out = {}
     out["listed"] = [t.name for t in await s.mcp.list_tools()]
     out["registered"] = len(s.mcp._tool_manager.list_tools())
-    out["instructions"] = s.mcp._mcp_server.instructions or ""
+    out["instructions"] = s.mcp.instructions or ""
 
     async def text(name, args):
         try:

@@ -1024,11 +1024,14 @@ async def ppt_run_steps(steps: list[dict], presentation: str | None = None,
 
 if CATALOG_MODE:
     try:
-        mcp._mcp_server.instructions = (
+        # MCPServer.instructions is read-only under both majors; the low-level
+        # server it reads from is _mcp_server under 1.x, _lowlevel_server under 2.x.
+        lowlevel = getattr(mcp, "_lowlevel_server", None) or mcp._mcp_server
+        lowlevel.instructions = (
             "Catalog mode: call ppt_describe() for the list of PowerPoint tools, "
             "ppt_describe(names) for their arguments, and run them with ppt_run or "
             "ppt_run_steps. Wherever the instructions say to call a tool, do it that way.\n\n"
-            + (mcp._mcp_server.instructions or "")
+            + (mcp.instructions or "")
         )
     except Exception:
         logger.warning("Could not add the catalog note to the instructions", exc_info=True)
