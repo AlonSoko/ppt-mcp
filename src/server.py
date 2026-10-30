@@ -225,11 +225,12 @@ class _PowerPointServer(MCPServer):
 
     async def list_tools(self, *args, **kwargs):
         tools = await super().list_tools(*args, **kwargs)
-        if not CATALOG_MODE:
-            return tools
-        # Catalog mode lists the three tools that reach the rest; every tool
-        # stays registered, so ppt_run dispatches through call_tool above.
-        return [t for t in tools if t.name in _CATALOG_TOOLS]
+        # Catalog mode, the default, lists the three tools that reach the
+        # rest; every tool stays registered, so ppt_run dispatches through
+        # call_tool above. PPT_TOOL_MODE=full lists every tool but those three.
+        if CATALOG_MODE:
+            return [t for t in tools if t.name in _CATALOG_TOOLS]
+        return [t for t in tools if t.name not in _CATALOG_TOOLS]
 
     def _registered_tool(self, name):
         """The SDK's Tool for `name`, or None.
@@ -833,16 +834,31 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# Catalog mode (PPT_TOOL_MODE=catalog)
+# Catalog mode, the default (PPT_TOOL_MODE=full to list every tool)
 # ---------------------------------------------------------------------------
 # A client sends every listed tool's schema with every request, and the 157
-# come to about 90k tokens. In catalog mode the server lists three tools: one
-# whose description is a line per tool and which returns full schemas on
-# request, one that runs any tool, and one that runs a list of calls. The
-# tools themselves are unchanged and run through the same call_tool, so their
-# validation, their checks and their layout findings are all as before.
+# come to about 112k tokens. In catalog mode the server lists three tools: one
+# that answers the list of tools, a line each, and full schemas on request,
+# one that runs any tool, and one that runs a list of calls. The tools
+# themselves are unchanged and run through the same call_tool, so their
+# validation, their checks and their layout findings are all as before. The
+# three are registered either way; full mode leaves them off the list.
 
-CATALOG_MODE = os.environ.get("PPT_TOOL_MODE", "").strip().lower() == "catalog"
+def _tool_mode(value):
+    """'catalog' or 'full', from PPT_TOOL_MODE."""
+    value = value.strip().lower()
+    if value in ("catalog", ""):
+        return "catalog"
+    if value in ("full", "all"):
+        return "full"
+    # Read at import, so a typo must not stop the server from starting.
+    logger.warning(
+        "PPT_TOOL_MODE=%r is not a setting; use 'catalog' (the default), or 'full' "
+        "to list every tool. Using 'catalog'.", value)
+    return "catalog"
+
+
+CATALOG_MODE = _tool_mode(os.getenv("PPT_TOOL_MODE", "catalog")) == "catalog"
 _CATALOG_TOOLS = frozenset({"ppt_describe", "ppt_run", "ppt_run_steps"})
 
 
@@ -930,80 +946,79 @@ def _resolve_refs(value, results):
     return node
 
 
+@mcp.tool(name="ppt_describe")
+async def ppt_describe(names: list[str] | None = None) -> str:
+    """The PowerPoint tools: call with no names first for the list of all
+    of them, one line each; then with the names you are about to use, once
+    each, for their full description and argument schema.
+
+    Every PowerPoint tool is run through ppt_run (one call) or
+    ppt_run_steps (several), not called directly, with exactly the
+    arguments its schema gives. Start a task with ppt_describe().
+    """
+    # The list is an answer, not part of this description: clients cut
+    # long descriptions short (Claude Code kept 54 of 157 lines), while a
+    # tool's answer reaches the model whole.
+    if not names:
+        return _catalog_lines()
+    found, missing = {}, []
+    for name in names:
+        tool = mcp._registered_tool(name)
+        if tool is None or name in _CATALOG_TOOLS:
+            missing.append(name)
+            continue
+        schema = dict(tool.parameters or {})
+        schema.get("properties", {}).pop(PRESENTATION_ARG, None)
+        params = (schema.get("properties") or {}).get("params")
+        found[name] = {"description": tool.description, "params": params}
+    result = {"tools": found}
+    if missing:
+        result["unknown"] = missing
+    return json.dumps(result, ensure_ascii=False)
+
+@mcp.tool(name="ppt_run")
+async def ppt_run(tool: str, params: dict | None = None, presentation: str | None = None):
+    """Run one PowerPoint tool: `tool` is its name, `params` its arguments
+    as ppt_describe gives them, `presentation` the deck it works on
+    (optional, as on every tool). Answers exactly what the tool answers."""
+    return await _run(tool, params, presentation)
+
+@mcp.tool(name="ppt_run_steps")
+async def ppt_run_steps(steps: list[dict], presentation: str | None = None,
+                        stop_on_error: bool = True):
+    """Run several PowerPoint tools in order, in one call.
+
+    Each step is {"tool": name, "params": {...}}. A value "$prev.key" is
+    the previous step's result field, and "$2.shape_name" the second
+    step's, so a step can use the shape the one before it made. The answer
+    lists each step's result; images (slide previews) follow it. With
+    stop_on_error, the first failing step ends the run and says why.
+    """
+    report, results, images = [], [], []
+    for number, step in enumerate(steps, start=1):
+        tool = (step or {}).get("tool")
+        try:
+            params = _resolve_refs(step.get("params") or {}, results)
+            blocks = await _run(tool, params, step.get("presentation", presentation))
+        except Exception as exc:  # noqa: BLE001 - reported per step
+            report.append({"step": number, "tool": tool, "error": str(exc)})
+            results.append(None)
+            if stop_on_error:
+                break
+            continue
+        text = _text_of(blocks)
+        try:
+            data = json.loads(text) if text else {}
+        except ValueError:
+            data = {"text": text}
+        results.append(data)
+        report.append({"step": number, "tool": tool, "result": data})
+        images += [b for b in blocks if getattr(b, "type", "") == "image"]
+    summary = json.dumps({"steps": report, "ran": len(report), "of": len(steps)},
+                         ensure_ascii=False)
+    return [summary, *images] if images else summary
+
 if CATALOG_MODE:
-
-    @mcp.tool(name="ppt_describe")
-    async def ppt_describe(names: list[str] | None = None) -> str:
-        """The PowerPoint tools: call with no names first for the list of all
-        of them, one line each; then with the names you are about to use, once
-        each, for their full description and argument schema.
-
-        Every PowerPoint tool is run through ppt_run (one call) or
-        ppt_run_steps (several), not called directly, with exactly the
-        arguments its schema gives. Start a task with ppt_describe().
-        """
-        # The list is an answer, not part of this description: clients cut
-        # long descriptions short (Claude Code kept 54 of 157 lines), while a
-        # tool's answer reaches the model whole.
-        if not names:
-            return _catalog_lines()
-        found, missing = {}, []
-        for name in names:
-            tool = mcp._registered_tool(name)
-            if tool is None or name in _CATALOG_TOOLS:
-                missing.append(name)
-                continue
-            schema = dict(tool.parameters or {})
-            schema.get("properties", {}).pop(PRESENTATION_ARG, None)
-            params = (schema.get("properties") or {}).get("params")
-            found[name] = {"description": tool.description, "params": params}
-        result = {"tools": found}
-        if missing:
-            result["unknown"] = missing
-        return json.dumps(result, ensure_ascii=False)
-
-    @mcp.tool(name="ppt_run")
-    async def ppt_run(tool: str, params: dict | None = None, presentation: str | None = None):
-        """Run one PowerPoint tool: `tool` is its name, `params` its arguments
-        as ppt_describe gives them, `presentation` the deck it works on
-        (optional, as on every tool). Answers exactly what the tool answers."""
-        return await _run(tool, params, presentation)
-
-    @mcp.tool(name="ppt_run_steps")
-    async def ppt_run_steps(steps: list[dict], presentation: str | None = None,
-                            stop_on_error: bool = True):
-        """Run several PowerPoint tools in order, in one call.
-
-        Each step is {"tool": name, "params": {...}}. A value "$prev.key" is
-        the previous step's result field, and "$2.shape_name" the second
-        step's, so a step can use the shape the one before it made. The answer
-        lists each step's result; images (slide previews) follow it. With
-        stop_on_error, the first failing step ends the run and says why.
-        """
-        report, results, images = [], [], []
-        for number, step in enumerate(steps, start=1):
-            tool = (step or {}).get("tool")
-            try:
-                params = _resolve_refs(step.get("params") or {}, results)
-                blocks = await _run(tool, params, step.get("presentation", presentation))
-            except Exception as exc:  # noqa: BLE001 - reported per step
-                report.append({"step": number, "tool": tool, "error": str(exc)})
-                results.append(None)
-                if stop_on_error:
-                    break
-                continue
-            text = _text_of(blocks)
-            try:
-                data = json.loads(text) if text else {}
-            except ValueError:
-                data = {"text": text}
-            results.append(data)
-            report.append({"step": number, "tool": tool, "result": data})
-            images += [b for b in blocks if getattr(b, "type", "") == "image"]
-        summary = json.dumps({"steps": report, "ran": len(report), "of": len(steps)},
-                             ensure_ascii=False)
-        return [summary, *images] if images else summary
-
     try:
         mcp._mcp_server.instructions = (
             "Catalog mode: call ppt_describe() for the list of PowerPoint tools, "

@@ -1,4 +1,4 @@
-"""Catalog mode (PPT_TOOL_MODE=catalog): three tools listed instead of 157.
+"""Catalog mode, the default: three tools listed instead of 157.
 
 The mode is read when the server module loads, so each check runs in a fresh
 interpreter with the variable set. Nothing here reaches PowerPoint: the calls
@@ -59,7 +59,10 @@ def _probe(mode):
     except ImportError:
         if sys.platform != "darwin":
             pytest.skip("the server needs pywin32 on Windows")
-    env = dict(os.environ, PPT_TOOL_MODE=mode)
+    env = dict(os.environ)
+    env.pop("PPT_TOOL_MODE", None)
+    if mode is not None:
+        env["PPT_TOOL_MODE"] = mode
     done = subprocess.run([sys.executable, "-c", _PROBE], cwd=ROOT, env=env,
                           capture_output=True, text=True, timeout=180)
     assert done.returncode == 0, done.stderr[-2000:]
@@ -68,7 +71,8 @@ def _probe(mode):
 
 @pytest.fixture(scope="module")
 def catalog():
-    return _probe("catalog")
+    # No setting at all: catalog mode is the default.
+    return _probe(None)
 
 
 def test_three_tools_are_listed_and_all_stay_registered(catalog):
@@ -110,6 +114,11 @@ def test_references_read_earlier_results(catalog):
     assert catalog["refs"] == {"a": "TextBox 2", "b": [7], "c": "$keep"}
 
 
-def test_without_the_variable_every_tool_is_listed():
-    full = _probe("")
-    assert len(full["listed"]) == full["registered"]
+def test_full_mode_lists_every_tool_but_the_three():
+    full = _probe("full")
+    assert len(full["listed"]) == full["registered"] - 3
+    assert not {"ppt_describe", "ppt_run", "ppt_run_steps"} & set(full["listed"])
+
+
+def test_a_setting_that_is_not_one_falls_back_to_catalog():
+    assert sorted(_probe("ful")["listed"]) == ["ppt_describe", "ppt_run", "ppt_run_steps"]
